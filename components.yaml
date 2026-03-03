@@ -1,0 +1,75 @@
+tektoncd-pipeline:
+  revision: release-1.6
+  releases:
+    - remote_path: pipeline
+      local_path: tekton-pipeline
+
+hubs-wrapper:
+  revision: release-1.0
+  releases:
+    - remote_path: api
+      local_path: tekton-pipeline
+      local_name: hubs-wrapper.yaml
+
+tektoncd-enhancement:
+  revision: main
+  releases:
+    - remote_path: enhancement
+      local_path: tekton-pipeline
+      local_name: tektoncd-enhancement.yaml
+
+tektoncd-pac:
+  revision: release-0.39
+  releases:
+    - remote_path: pac
+      local_path: tekton-pipelines-as-code
+
+tektoncd-chain:
+  revision: release-0.26
+  releases:
+    - remote_path: chain
+      local_path: tekton-chains
+
+tektoncd-hub:
+  revision: release-1.23
+  releases:
+    - remote_path: api
+      local_path: tekton-hub
+      local_sub_path: api
+    - remote_path: hub-info
+      local_path: tekton-hub
+      local_sub_path: hub-info
+
+tektoncd-trigger:
+  revision: release-0.34
+  releases:
+    - remote_path: trigger
+      local_path: tekton-trigger
+    - remote_path: bindings
+      local_path: tekton-trigger
+      local_name: bindings.yaml
+
+tektoncd-result:
+  revision: release-0.17
+  releases:
+    - remote_path: result
+      local_path: tekton-results
+
+tektoncd-pruner:
+  revision: release-0.3
+  releases:
+    - remote_path: pruner
+      local_path: pruner
+
+tektoncd-manual-approval-gate:
+  revision: release-0.7
+  releases:
+    - remote_path: manual-approval-gate
+      local_path: manual-approval-gate
+
+catalog:
+  revision: main
+  releases:
+    - remote_path: catalog
+      local_path: tekton-hub/api
+      local_name: catalog.yaml

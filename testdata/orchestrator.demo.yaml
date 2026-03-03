@@ -1,0 +1,245 @@
+apiVersion: porch/v1
+kind: ReleaseOrchestration
+metadata:
+  name: tektoncd-main
+
+# ── 连接配置 ──
+connection:
+  kubeconfig: ~/.kube/config
+  context: ""                        # 可选，指定 k8s context；为空则用 current-context
+  github_org: TestGroup           # GitHub 组织名
+
+# ── 监控配置 ──
+watch:
+  interval: 30s                      # kubectl 轮询间隔（本地查询，可以较频繁）
+  exit_after_final_ok: false         # true: FINAL_OK 后立即退出；false: 保持常驻继续监听
+
+# ── 重试配置 ──
+retry:
+  max_retries: 10                    # 单个流水线最大重试次数
+  backoff:                           # 退避策略（算法计算）
+    initial: 1m                      # 首次重试等待时间
+    multiplier: 1.5                  # 退避乘数
+    max: 2m                          # 单次退避上限
+  retry_settle_delay: 90s            # 重试后等待多久再查询新 PipelineRun（等待 CI 创建）
+
+# ── 超时配置 ──
+timeout:
+  global: 12h                        # 整个编排的全局超时，超时后标记失败并通知
+
+# ── 通知配置 ──
+notification:
+  wecom_webhook: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={uuid}"                  # 企业微信 Webhook URL，为空则不发通知
+  progress_interval: 10m             # 每 10 分钟发一次进度，不填则不发
+  notify_rows_per_message: 12        # 单条通知最多包含的记录条数；<=0 使用默认值 12
+  events:                            # 触发通知的事件类型，注释掉表示不发该类型
+    - all_succeeded                  # 所有组件成功完成（最终通知）
+    - progress_report                # 进度定时报告（需配合 progress_interval 使用）
+    - component_exhausted            # 某组件重试次数耗尽
+    # - global_timeout               # 全局超时（通常与 TIMEOUT 日志重复，按需开启）
+
+# ── 日志配置 ──
+log:
+  file: ./.porch-events.log          # 事件日志文件路径，持久化到本地
+
+# ── 行为开关 ──
+# true: 禁用 final_action 触发（仅监控与重试，不触发 tektoncd-operator）
+disable_final_action: false
+
+# ── 分支来源 ──
+# 从此文件读取各组件的 revision（分支），支持通过 CLI 参数 --components-file 覆盖
+# 每个组件的 key 必须与下面 components 中的 name 匹配
+components_file: ./components.yaml
+
+# ── 组件定义 ──
+# 除 branch 外的所有属性都在此声明
+components-x:
+  - name: tektoncd-pipeline          # 必须与 components.yaml 中的 key 一致
+    repo: tektoncd-pipeline          # GitHub 仓库名（org 来自 connection.github_org）
+    pipelines:                       # 需要监控的流水线列表
+      - name: tp-all-in-one          # PipelineRun 的 original-prname
+        retry_command: "/test tp-all-in-one branch:{branch}"
+
+  - name: hubs-wrapper
+    repo: tektoncd-hubs-api
+    pipelines:
+      - name: tha-all-in-one
+        retry_command: "/test tha-all-in-one branch:{branch}"
+
+  - name: tektoncd-enhancement
+    repo: tektoncd-enhancement
+    pipelines:
+      - name: te-enhancement-all-in-one
+        retry_command: "/test te-enhancement-all-in-one branch:{branch}"
+
+  - name: tektoncd-pac
+    repo: tektoncd-pipelines-as-code
+    pipelines:
+      - name: pac-all-in-one
+        retry_command: "/test pac-all-in-one branch:{branch}"
+
+  - name: tektoncd-chain
+    repo: tektoncd-chains
+    pipelines:
+      - name: tc-all-in-one
+        retry_command: "/test tc-all-in-one branch:{branch}"
+
+  - name: tektoncd-hub
+    repo: tektoncd-hub
+    pipelines:
+      - name: th-all-in-one
+        retry_command: "/test th-all-in-one branch:{branch}"
+
+  - name: tektoncd-trigger
+    repo: tektoncd-triggers
+    pipelines:
+      - name: tt-all-in-one
+        retry_command: "/test tt-all-in-one branch:{branch}"
+
+  - name: tektoncd-result
+    repo: tektoncd-results
+    pipelines:
+      - name: tr-all-in-one
+        retry_command: "/test tr-all-in-one branch:{branch}"
+
+  - name: tektoncd-pruner
+    repo: tektoncd-pruner
+    pipelines:
+      - name: tpr-all-in-one
+        retry_command: "/test tpr-all-in-one branch:{branch}"
+
+  - name: tektoncd-manual-approval-gate
+    repo: tektoncd-manual-approval-gate
+    pipelines:
+      - name: approval-all-in-one
+        retry_command: "/test approval-all-in-one branch:{branch}"
+
+  - name: catalog
+    repo: catalog
+    pipelines:
+      - name: catalog-all-in-one
+        retry_command: "/test catalog-all-in-one branch:{branch}"
+
+# ── 组件定义 ──
+# 除 branch 外的所有属性都在此声明
+components:
+  - name: tektoncd-pipeline          # 必须与 components.yaml 中的 key 一致
+    repo: tektoncd-pipeline          # GitHub 仓库名（org 来自 connection.github_org）
+    branch_patterns:
+      - "^main$"
+      - "^release-[0-9]+\\.[0-9]+$"
+    pipelines:                       # 需要监控的流水线列表
+      - name: tp-all-in-one          # PipelineRun 的 original-prname
+        retry_command: "/test tp-all-in-one branch:{branch}"
+
+  - name: hubs-wrapper
+    repo: tektoncd-hubs-api
+    branch_patterns:
+      - "^main$"
+      - "^release-[0-9]+\\.[0-9]+$"
+    pipelines:
+      - name: tha-all-in-one
+        retry_command: "/test tha-all-in-one branch:{branch}"
+
+  - name: tektoncd-enhancement
+    repo: tektoncd-enhancement
+    branch_patterns:
+      - "^main$"
+      - "^release-[0-9]+\\.[0-9]+$"
+    pipelines:
+      - name: te-enhancement-all-in-one
+        retry_command: "/test te-enhancement-all-in-one branch:{branch}"
+
+  - name: tektoncd-pac
+    repo: tektoncd-pipelines-as-code
+    branch_patterns:
+      - "^main$"
+      - "^release-[0-9]+\\.[0-9]+$"
+    pipelines:
+      - name: pac-all-in-one
+        retry_command: "/test pac-all-in-one branch:{branch}"
+
+  - name: tektoncd-chain
+    repo: tektoncd-chains
+    branch_patterns:
+      - "^main$"
+      - "^release-[0-9]+\\.[0-9]+$"
+    pipelines:
+      - name: tc-all-in-one
+        retry_command: "/test tc-all-in-one branch:{branch}"
+
+  - name: tektoncd-hub
+    repo: tektoncd-hub
+    branch_patterns:
+      - "^main$"
+      - "^release-[0-9]+\\.[0-9]+$"
+    pipelines:
+      - name: th-all-in-one
+        retry_command: "/test th-all-in-one branch:{branch}"
+
+  - name: tektoncd-trigger
+    repo: tektoncd-triggers
+    branch_patterns:
+      - "^main$"
+      - "^release-[0-9]+\\.[0-9]+$"
+    pipelines:
+      - name: tt-all-in-one
+        retry_command: "/test tt-all-in-one branch:{branch}"
+
+  - name: tektoncd-result
+    repo: tektoncd-results
+    branch_patterns:
+      - "^main$"
+      - "^release-[0-9]+\\.[0-9]+$"
+    pipelines:
+      - name: tr-all-in-one
+        retry_command: "/test tr-all-in-one branch:{branch}"
+
+  - name: tektoncd-pruner
+    repo: tektoncd-pruner
+    branch_patterns:
+      - "^main$"
+      - "^release-[0-9]+\\.[0-9]+$"
+    pipelines:
+      - name: tpr-all-in-one
+        retry_command: "/test tpr-all-in-one branch:{branch}"
+
+  - name: tektoncd-manual-approval-gate
+    repo: tektoncd-manual-approval-gate
+    branch_patterns:
+      - "^main$"
+      - "^release-[0-9]+\\.[0-9]+$"
+    pipelines:
+      - name: approval-all-in-one
+        retry_command: "/test approval-all-in-one branch:{branch}"
+
+  - name: catalog
+    repo: catalog
+    branch_patterns:
+      - "^main$"
+      - "^release-[0-9]+\\.[0-9]+$"
+    pipelines:
+      - name: catalog-all-in-one
+        retry_command: "/test catalog-all-in-one branch:{branch}"
+
+# ── 依赖关系（可选） ──
+# 默认所有组件并行监控。声明依赖后，子组件等上游全部成功才开始监控。
+dependencies:
+  # tektoncd-hub:
+  #   depends_on: [tektoncd-pipeline]
+  # catalog:
+  #   depends_on: [tektoncd-hub]
+
+# ── 最终动作 ──
+# 所有组件的所有流水线都成功后执行
+final_action:
+  # 在 tektoncd-operator 自己的对应分支最新 commit 上评论
+  # 触发 pr-update-components.yaml 中定义的 to-update-components 流水线
+  repo: tektoncd-operator            # GitHub 仓库名
+  # branch 来源策略（三选一，优先级从高到低）：
+  #   1. CLI 参数 --final-branch 覆盖
+  #   2. 直接指定 branch
+  #   3. 指定 branch_from_component，从某个组件的 revision 推导
+  branch: ""                     # 直接指定分支（如 release-1.6）支持通过 CLI 参数 --final-branch 覆盖
+  branch_from_component: "catalog"   # 从指定组件的 revision 推导（如 tektoncd-pipeline）
+  comment: "/test to-update-components branch:{branch}"      # 评论内容

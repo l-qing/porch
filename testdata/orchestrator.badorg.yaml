@@ -1,0 +1,48 @@
+apiVersion: porch/v1
+kind: ReleaseOrchestration
+metadata:
+  name: tektoncd-main
+
+connection:
+  kubeconfig: ~/.kube/config
+  context: ""
+  github_org: NonExistentOrgForFailureDrill
+
+watch:
+  interval: 2s
+
+retry:
+  max_retries: 1
+  backoff:
+    initial: 1s
+    multiplier: 1.5
+    max: 3s
+  retry_settle_delay: 1s
+
+timeout:
+  global: 6s
+
+notification:
+  wecom_webhook: ""
+  events:
+    - all_succeeded
+    - component_exhausted
+    - global_timeout
+
+log:
+  file: ./testdata/.porch-events-badorg.log
+
+components_file: ../components.yaml
+
+components:
+  - name: tektoncd-pipeline
+    repo: tektoncd-pipeline
+    pipelines:
+      - name: tp-all-in-one
+        retry_command: "/test tp-all-in-one branch:{branch}"
+
+final_action:
+  repo: tektoncd-operator
+  branch: "main"
+  branch_from_component: ""
+  comment: "/test to-update-components branch:{branch}"
