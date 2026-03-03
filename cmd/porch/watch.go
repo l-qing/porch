@@ -58,6 +58,7 @@ type watchOptions struct {
 	componentName  string
 	pipelineName   string
 	branch         string
+	branchPattern  string
 	dryRun         bool
 }
 
@@ -90,6 +91,7 @@ func newWatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.componentName, "component", "", "watch only one component")
 	cmd.Flags().StringVar(&opts.pipelineName, "pipeline", "", "watch only one pipeline under selected component")
 	cmd.Flags().StringVar(&opts.branch, "branch", "", "override selected component branch at runtime")
+	cmd.Flags().StringVar(&opts.branchPattern, "branch-pattern", "", "select branches by regular expression under selected component")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "query only, do not trigger retry")
 	mustBindPFlag(viperKeyWatchConfig, cmd, "config")
 	mustBindPFlag(viperKeyWatchStateFile, cmd, "state-file")
@@ -120,12 +122,19 @@ func runWatch(opts watchOptions) error {
 	defer signal.Stop(sigCh)
 
 	ghc := gh.NewClient(cfg.Root.Connection.GitHubOrg, nil)
-	cfg, err = resolvePatternComponents(ctx, cfg, ghc)
-	if err != nil {
-		return err
+	if shouldSkipPatternResolutionForAdHocScope(cfg.Components, opts) {
+		log.WithFields(logrus.Fields{
+			"component_scope": normalize(strings.TrimSpace(opts.componentName)),
+			"pipeline_scope":  normalize(strings.TrimSpace(opts.pipelineName)),
+		}).Debug("skip global branch pattern expansion for ad-hoc scoped watch")
+	} else {
+		cfg, err = resolvePatternComponents(ctx, cfg, ghc)
+		if err != nil {
+			return err
+		}
 	}
 	notifyRowsPerMessage := resolveNotifyRowsPerMessage(cfg.Root.Notification.NotifyRowsPerMessage)
-	scopedMode, err := applyWatchScope(&cfg, opts)
+	scopedMode, err := applyWatchScopeWithBranchLister(ctx, &cfg, opts, ghc)
 	if err != nil {
 		return err
 	}
@@ -136,6 +145,7 @@ func runWatch(opts watchOptions) error {
 		"component_scope":      normalize(strings.TrimSpace(opts.componentName)),
 		"pipeline_scope":       normalize(strings.TrimSpace(opts.pipelineName)),
 		"branch_override":      normalize(strings.TrimSpace(opts.branch)),
+		"branch_pattern_scope": normalize(strings.TrimSpace(opts.branchPattern)),
 		"scoped_mode":          fmt.Sprintf("%t", scopedMode),
 		"final_branch":         normalize(opts.finalBranch),
 		"disable_final_action": fmt.Sprintf("%t", opts.disableFinalAction || cfg.Root.DisableFinalAction),
@@ -427,10 +437,42 @@ func resolvePatternComponents(ctx context.Context, cfg config.RuntimeConfig, ghc
 	return cfg, nil
 }
 
+type branchLister interface {
+	ListBranches(context.Context, string) ([]string, error)
+}
+
+func shouldSkipPatternResolutionForAdHocScope(components []config.LoadedComponent, opts watchOptions) bool {
+	componentName := strings.TrimSpace(opts.componentName)
+	pipelineName := strings.TrimSpace(opts.pipelineName)
+	if componentName == "" || pipelineName == "" {
+		return false
+	}
+	selected := matchComponentsBySelector(components, componentName)
+	return len(selected) == 0
+}
+
 func applyWatchScope(cfg *config.RuntimeConfig, opts watchOptions) (bool, error) {
+	return applyWatchScopeWithBranchLister(context.Background(), cfg, opts, nil)
+}
+
+func applyWatchScopeWithBranchLister(ctx context.Context, cfg *config.RuntimeConfig, opts watchOptions, lister branchLister) (bool, error) {
 	componentName := strings.TrimSpace(opts.componentName)
 	pipelineName := strings.TrimSpace(opts.pipelineName)
 	branch := strings.TrimSpace(opts.branch)
+	branchPattern := strings.TrimSpace(opts.branchPattern)
+
+	if branch != "" && branchPattern != "" {
+		return false, fmt.Errorf("--branch and --branch-pattern are mutually exclusive")
+	}
+
+	var branchRegex *regexp.Regexp
+	if branchPattern != "" {
+		re, err := regexp.Compile(branchPattern)
+		if err != nil {
+			return false, fmt.Errorf("compile --branch-pattern %q: %w", branchPattern, err)
+		}
+		branchRegex = re
+	}
 
 	if componentName == "" {
 		if pipelineName != "" {
@@ -438,6 +480,9 @@ func applyWatchScope(cfg *config.RuntimeConfig, opts watchOptions) (bool, error)
 		}
 		if branch != "" {
 			return false, fmt.Errorf("--branch requires --component")
+		}
+		if branchPattern != "" {
+			return false, fmt.Errorf("--branch-pattern requires --component")
 		}
 		return false, nil
 	}
@@ -447,7 +492,36 @@ func applyWatchScope(cfg *config.RuntimeConfig, opts watchOptions) (bool, error)
 		if pipelineName == "" {
 			return false, fmt.Errorf("component %q not found", componentName)
 		}
-		selected = []config.LoadedComponent{buildAdHocComponent(componentName, pipelineName, branch)}
+		if branchPattern != "" {
+			if lister == nil {
+				return false, fmt.Errorf("--branch-pattern requires branch lister when component %q is not defined in config", componentName)
+			}
+			branches, err := lister.ListBranches(ctx, componentName)
+			if err != nil {
+				return false, fmt.Errorf("list branches for %s: %w", componentName, err)
+			}
+			matched := make([]string, 0, len(branches))
+			for _, current := range branches {
+				if branchRegex.MatchString(current) {
+					matched = append(matched, current)
+				}
+			}
+			if len(matched) == 0 {
+				return false, fmt.Errorf("branch pattern %q matched no branches under component %q", branchPattern, componentName)
+			}
+			sort.Strings(matched)
+			selected = make([]config.LoadedComponent, 0, len(matched))
+			multi := len(matched) > 1
+			for _, current := range matched {
+				adHoc := buildAdHocComponent(componentName, pipelineName, current)
+				if multi {
+					adHoc.Name = fmt.Sprintf("%s@%s", componentName, current)
+				}
+				selected = append(selected, adHoc)
+			}
+		} else {
+			selected = []config.LoadedComponent{buildAdHocComponent(componentName, pipelineName, branch)}
+		}
 	}
 
 	if branch != "" {
@@ -464,6 +538,19 @@ func applyWatchScope(cfg *config.RuntimeConfig, opts watchOptions) (bool, error)
 		} else {
 			return false, fmt.Errorf("branch %q not found under component %q", branch, componentName)
 		}
+	}
+
+	if branchRegex != nil {
+		filteredByPattern := make([]config.LoadedComponent, 0, len(selected))
+		for _, c := range selected {
+			if branchRegex.MatchString(c.Branch) {
+				filteredByPattern = append(filteredByPattern, c)
+			}
+		}
+		if len(filteredByPattern) == 0 {
+			return false, fmt.Errorf("branch pattern %q matched no branches under component %q", branchPattern, componentName)
+		}
+		selected = filteredByPattern
 	}
 
 	if pipelineName != "" {

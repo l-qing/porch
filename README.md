@@ -42,6 +42,9 @@ make build
 # 单组件/单流水线观测（运行时覆盖分支，不改配置文件）
 ./bin/porch watch --config ./testdata/orchestrator.e2e.yaml --component tektoncd-pipeline --pipeline tp-all-in-one --branch release-1.0 --dry-run
 
+# Single-component regex branch scope (match main and release-*.*)
+./bin/porch watch --config ./testdata/orchestrator.e2e.yaml --component tektoncd-pipeline --branch-pattern "^(main|release-[0-9]+[.][0-9]+)$" --dry-run
+
 # Ad-hoc repo watch (repo not defined in components)
 ./bin/porch watch --config ./config.yaml --component tektoncd-operator --pipeline to-all-in-one --branch main --exit-after-final-ok
 
@@ -96,6 +99,7 @@ make build
 - `--component`：仅监控指定组件（可选）
 - `--pipeline`：仅监控指定组件下的某条流水线（可选，需配合 `--component`）
 - `--branch`：仅覆盖 `--component` 对应组件分支（可选，需配合 `--component`）
+- `--branch-pattern`: filter multiple branches under `--component` using Go regexp (optional, requires `--component`, mutually exclusive with `--branch`, example: `^(main|release-[0-9]+[.][0-9]+)$`)
 - `--exit-after-final-ok`：`FINAL_OK` 后立即退出（默认不退出，保持常驻）
 - `--dry-run`：监控与计算执行，但不发送重试/final comment
 
@@ -112,11 +116,14 @@ Ad-hoc repo mode:
 - This mode does not require the repo to exist in `components`.
 - The generated retry command is `/test <pipeline> branch:{branch}`.
 - If `--branch` is not provided, branch defaults to `main`.
+- `--branch-pattern` is supported in this mode and will expand multiple ad-hoc runtime components by querying repo branches and applying the regexp.
 
 Example:
 
 ```bash
 ./bin/porch watch --config ./config.yaml --component tektoncd-operator --pipeline to-all-in-one --branch main --exit-after-final-ok
+
+./bin/porch watch --config ./config.yaml --component tektoncd-operator --pipeline to-all-in-one --branch-pattern "^(main|release-.*)$" --exit-after-final-ok
 ```
 
 ## 环境变量映射（viper）

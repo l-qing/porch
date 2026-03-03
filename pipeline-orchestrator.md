@@ -616,8 +616,15 @@ watch 子命令参数：
 --component             仅监控指定组件（进入单组件模式）
 --pipeline              仅监控指定组件下的某条流水线（需配合 --component）
 --branch                覆盖 --component 对应组件的分支（需配合 --component）
+--branch-pattern        Filter branches by Go regexp under --component (mutually exclusive with --branch)
 --exit-after-final-ok   FINAL_OK 后立即退出（默认不退出，保持常驻）
 --dry-run               监控与计算执行，但不发送重试/final comment
+```
+
+Regex example for matching `main` and `release-*.*`:
+
+```bash
+porch watch --config orchestrator.yaml --component tektoncd-pipeline --branch-pattern "^(main|release-[0-9]+[.][0-9]+)$"
 ```
 
 retry 子命令参数：
