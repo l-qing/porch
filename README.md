@@ -316,3 +316,9 @@ notification:
 - 使用 `--verbose`（或 `--log-level debug`）可看到外部命令追踪日志（如 `gh api`、`kubectl get pipelinerun` 的开始/耗时/失败摘要）。
 - `watch` 模式下终端会显示实时表格与 Events 区域；同样会持续写日志文件。
 - 运行过程会写入日志与 state 文件，见 `.gitignore` 已忽略项。
+
+## License
+
+Copyright 2026 The porch Authors.
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](./LICENSE) for details.
