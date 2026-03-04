@@ -799,14 +799,17 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 				emit("QUERY_ERR", fmt.Sprintf("%s/%s exceeded query error threshold", c.Name, p.Name), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "reason": "query_error_threshold"})
 
 			case "failed":
-				p.Status = "failed"
 				p.Conclusion = "failure"
-				emit("FAILED", fmt.Sprintf("%s/%s failed, retry_count=%d", c.Name, p.Name, p.RetryCount), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "reason": res.Reason})
-				if p.RetryCount >= cfg.Root.Retry.MaxRetries {
+				retryLimitEnabled := cfg.Root.Retry.MaxRetries > 0
+				if retryLimitEnabled && p.RetryCount >= cfg.Root.Retry.MaxRetries {
+					if p.Status != "exhausted" {
+						emit("EXHAUSTED", fmt.Sprintf("%s/%s retries exhausted", c.Name, p.Name), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "attempt": fmt.Sprintf("%d", p.RetryCount)})
+					}
 					p.Status = "exhausted"
-					emit("EXHAUSTED", fmt.Sprintf("%s/%s retries exhausted", c.Name, p.Name), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "attempt": fmt.Sprintf("%d", p.RetryCount)})
 					continue
 				}
+				p.Status = "failed"
+				emit("FAILED", fmt.Sprintf("%s/%s failed, retry_count=%d", c.Name, p.Name, p.RetryCount), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "reason": res.Reason})
 
 				attempt := p.RetryCount + 1
 				backoff := retrier.BackoffDuration(

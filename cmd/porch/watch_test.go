@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"porch/pkg/config"
 	"porch/pkg/gh"
@@ -254,6 +255,142 @@ func TestWatchOnceGHOnlySkipsKubectl(t *testing.T) {
 
 	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("kubectl should not be called in gh-only mode")
+	}
+}
+
+func TestWatchOnceExhaustedNotificationOnlyOnce(t *testing.T) {
+	runner := fakeRunner{fn: func(args ...string) ([]byte, []byte, error) {
+		joined := strings.Join(args, " ")
+		switch joined {
+		case "api repos/TestGroup/tektoncd-operator/commits/abc123/check-runs":
+			return []byte(`{"check_runs":[{"id":40,"name":"Pipelines as Code CI / to-all-in-one","status":"completed","conclusion":"failure","details_url":"https://x/workspace/devops~business-build~devops/pipeline/pipelineRuns/detail/to-all-in-one-abc12"}]}`), nil, nil
+		default:
+			return nil, []byte("unexpected args"), errors.New("unexpected")
+		}
+	}}
+
+	ghc := gh.NewClient("TestGroup", runner)
+	cfg := config.RuntimeConfig{
+		Root: config.Root{
+			Connection: config.Connection{
+				GitHubOrg: "TestGroup",
+			},
+			Retry: config.Retry{
+				MaxRetries: 1,
+				Backoff: config.Backoff{
+					Initial:    config.Duration{Duration: time.Second},
+					Multiplier: 1,
+					Max:        config.Duration{Duration: time.Second},
+				},
+			},
+		},
+	}
+	dag, err := resolver.New([]config.LoadedComponent{{Name: "tektoncd-operator"}}, map[string]config.Depends{})
+	if err != nil {
+		t.Fatalf("build dag: %v", err)
+	}
+	tracked := map[string]*trackedComponent{
+		"tektoncd-operator": {
+			Name:   "tektoncd-operator",
+			Repo:   "tektoncd-operator",
+			Branch: "release-4.6",
+			SHA:    "abc123",
+			Pipelines: map[string]*trackedPipeline{
+				"to-all-in-one": {
+					Name:       "to-all-in-one",
+					Status:     "watching",
+					RetryCount: 1,
+				},
+			},
+		},
+	}
+	exhaustedCount := 0
+	emit := func(kind, _ string, _ logrus.Fields) {
+		if kind == "EXHAUSTED" {
+			exhaustedCount++
+		}
+	}
+
+	for i := 0; i < 2; i++ {
+		if err := watchOnce(context.Background(), logrus.New(), cfg, ghc, dag, tracked, probeModeGHOnly, true, emit); err != nil {
+			t.Fatalf("watchOnce error: %v", err)
+		}
+	}
+
+	if exhaustedCount != 1 {
+		t.Fatalf("exhausted notifications = %d, want 1", exhaustedCount)
+	}
+	if got := tracked["tektoncd-operator"].Pipelines["to-all-in-one"].Status; got != "exhausted" {
+		t.Fatalf("status = %q, want exhausted", got)
+	}
+}
+
+func TestWatchOnceMaxRetriesZeroDisablesExhaustedThreshold(t *testing.T) {
+	runner := fakeRunner{fn: func(args ...string) ([]byte, []byte, error) {
+		joined := strings.Join(args, " ")
+		switch joined {
+		case "api repos/TestGroup/tektoncd-operator/commits/abc123/check-runs":
+			return []byte(`{"check_runs":[{"id":41,"name":"Pipelines as Code CI / to-all-in-one","status":"completed","conclusion":"failure","details_url":"https://x/workspace/devops~business-build~devops/pipeline/pipelineRuns/detail/to-all-in-one-abc13"}]}`), nil, nil
+		default:
+			return nil, []byte("unexpected args"), errors.New("unexpected")
+		}
+	}}
+
+	ghc := gh.NewClient("TestGroup", runner)
+	cfg := config.RuntimeConfig{
+		Root: config.Root{
+			Connection: config.Connection{
+				GitHubOrg: "TestGroup",
+			},
+			Retry: config.Retry{
+				MaxRetries: 0,
+				Backoff: config.Backoff{
+					Initial:    config.Duration{Duration: time.Second},
+					Multiplier: 1,
+					Max:        config.Duration{Duration: time.Second},
+				},
+			},
+		},
+	}
+	dag, err := resolver.New([]config.LoadedComponent{{Name: "tektoncd-operator"}}, map[string]config.Depends{})
+	if err != nil {
+		t.Fatalf("build dag: %v", err)
+	}
+	tracked := map[string]*trackedComponent{
+		"tektoncd-operator": {
+			Name:   "tektoncd-operator",
+			Repo:   "tektoncd-operator",
+			Branch: "release-4.6",
+			SHA:    "abc123",
+			Pipelines: map[string]*trackedPipeline{
+				"to-all-in-one": {
+					Name:       "to-all-in-one",
+					Status:     "watching",
+					RetryCount: 7,
+				},
+			},
+		},
+	}
+	exhaustedCount := 0
+	emit := func(kind, _ string, _ logrus.Fields) {
+		if kind == "EXHAUSTED" {
+			exhaustedCount++
+		}
+	}
+
+	if err := watchOnce(context.Background(), logrus.New(), cfg, ghc, dag, tracked, probeModeGHOnly, true, emit); err != nil {
+		t.Fatalf("watchOnce error: %v", err)
+	}
+
+	p := tracked["tektoncd-operator"].Pipelines["to-all-in-one"]
+	if p.Status != "backoff" {
+		t.Fatalf("status = %q, want backoff", p.Status)
+	}
+	if p.RetryAfter == nil {
+		t.Fatalf("retryAfter should be set when max_retries is 0")
+	}
+	if exhaustedCount != 0 {
+		t.Fatalf("exhausted notifications = %d, want 0", exhaustedCount)
 	}
 }
 
