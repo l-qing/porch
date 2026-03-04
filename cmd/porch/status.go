@@ -11,6 +11,7 @@ import (
 
 	"porch/pkg/component"
 	"porch/pkg/gh"
+	pipestatus "porch/pkg/pipeline"
 	"porch/pkg/tui"
 	"porch/pkg/watcher"
 )
@@ -155,7 +156,7 @@ func fallbackProbeStatusFromGH(ctx context.Context, ghc *gh.Client, c component.
 			return watcher.ProbeFromCheckRun(r.Status, r.Conclusion), "gh_current_sha", nil
 		}
 		if _, ok := component.FindPipelineCheckRun(runs, pipeline); ok {
-			return watcher.ProbeResult{Status: "running", Reason: "gh_fallback_run_mismatch", Conclusion: "unknown"}, "gh_current_sha_run_mismatch", nil
+			return watcher.ProbeResult{Status: pipestatus.StatusRunning, Reason: "gh_fallback_run_mismatch", Conclusion: pipestatus.ConclusionUnknown}, "gh_current_sha_run_mismatch", nil
 		}
 		return watcher.ProbeResult{}, "", fmt.Errorf("pipeline %q run %q not found in GH check-runs", pipeline, currentRun)
 	}

@@ -8,6 +8,7 @@ import (
 
 	"porch/pkg/config"
 	"porch/pkg/gh"
+	pipestatus "porch/pkg/pipeline"
 )
 
 type PipelineRuntime struct {
@@ -47,7 +48,7 @@ func Initialize(ctx context.Context, cfg config.RuntimeConfig, ghc *gh.Client) (
 
 		runtime := RuntimeComponent{Name: c.Name, Repo: c.Repo, Branch: c.Branch, SHA: sha}
 		for _, p := range c.Pipelines {
-			pr := PipelineRuntime{Name: p.Name, Status: "missing", Conclusion: "-"}
+			pr := PipelineRuntime{Name: p.Name, Status: pipestatus.StatusMissing.String(), Conclusion: "-"}
 			if cr, ok := FindPipelineCheckRun(checkRuns, p.Name); ok {
 				pr.CheckRunName = cr.Name
 				pr.Status = cr.Status

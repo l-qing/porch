@@ -11,13 +11,15 @@ import (
 	"strings"
 	"time"
 
+	pipestatus "porch/pkg/pipeline"
+
 	"github.com/sirupsen/logrus"
 )
 
 type ProbeResult struct {
-	Status     string
+	Status     pipestatus.Status
 	Reason     string
-	Conclusion string
+	Conclusion pipestatus.Conclusion
 }
 
 func ProbePipelineRun(ctx context.Context, namespace, name, kubeconfig, kubeContext string) (ProbeResult, error) {
@@ -106,15 +108,15 @@ func ProbePipelineRun(ctx context.Context, namespace, name, kubeconfig, kubeCont
 		}
 		switch c.Status {
 		case "True":
-			return ProbeResult{Status: "succeeded", Reason: c.Reason, Conclusion: "success"}, nil
+			return ProbeResult{Status: pipestatus.StatusSucceeded, Reason: c.Reason, Conclusion: pipestatus.ConclusionSuccess}, nil
 		case "False":
-			return ProbeResult{Status: "failed", Reason: c.Reason, Conclusion: "failure"}, nil
+			return ProbeResult{Status: pipestatus.StatusFailed, Reason: c.Reason, Conclusion: pipestatus.ConclusionFailure}, nil
 		default:
-			return ProbeResult{Status: "running", Reason: c.Reason, Conclusion: "unknown"}, nil
+			return ProbeResult{Status: pipestatus.StatusRunning, Reason: c.Reason, Conclusion: pipestatus.ConclusionUnknown}, nil
 		}
 	}
 
-	return ProbeResult{Status: "unknown", Conclusion: "unknown"}, nil
+	return ProbeResult{Status: pipestatus.StatusUnknown, Conclusion: pipestatus.ConclusionUnknown}, nil
 }
 
 func summarize(s string, n int) string {

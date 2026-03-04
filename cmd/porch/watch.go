@@ -20,6 +20,7 @@ import (
 	"porch/pkg/config"
 	"porch/pkg/gh"
 	"porch/pkg/notify"
+	pipestatus "porch/pkg/pipeline"
 	"porch/pkg/resolver"
 	"porch/pkg/retrier"
 	"porch/pkg/state"
@@ -32,8 +33,8 @@ type trackedPipeline struct {
 	RetryCmd    string
 	Namespace   string
 	PipelineRun string
-	Status      string
-	Conclusion  string
+	Status      pipestatus.Status
+	Conclusion  pipestatus.Conclusion
 	RetryCount  int
 	QueryErrors int
 	RunMismatch int
@@ -62,9 +63,53 @@ type watchOptions struct {
 	dryRun         bool
 }
 
+type watchEventKind string
+
+const (
+	eventRecoverSkip    watchEventKind = "RECOVER_SKIP"
+	eventRecover        watchEventKind = "RECOVER"
+	eventRecoverWarn    watchEventKind = "RECOVER_WARN"
+	eventInit           watchEventKind = "INIT"
+	eventProbeMode      watchEventKind = "PROBE_MODE"
+	eventScope          watchEventKind = "SCOPE"
+	eventFinalDisabled  watchEventKind = "FINAL_DISABLED"
+	eventWatchErr       watchEventKind = "WATCH_ERR"
+	eventNotifyErr      watchEventKind = "NOTIFY_ERR"
+	eventScopeDone      watchEventKind = "SCOPE_DONE"
+	eventAllDone        watchEventKind = "ALL_DONE"
+	eventFinalResident  watchEventKind = "FINAL_RESIDENT"
+	eventFinalErr       watchEventKind = "FINAL_ERR"
+	eventDryFinal       watchEventKind = "DRY_FINAL"
+	eventFinalOK        watchEventKind = "FINAL_OK"
+	eventStateErr       watchEventKind = "STATE_ERR"
+	eventNotifyProgress watchEventKind = "NOTIFY_PROGRESS"
+	eventTimeout        watchEventKind = "TIMEOUT"
+	eventExit           watchEventKind = "EXIT"
+	eventDryRetry       watchEventKind = "DRY_RETRY"
+	eventRetryOK        watchEventKind = "RETRY_OK"
+	eventGHFallback     watchEventKind = "GH_FALLBACK"
+	eventRunMismatch    watchEventKind = "RUN_MISMATCH"
+	eventRunStale       watchEventKind = "RUN_STALE"
+	eventSuccess        watchEventKind = "SUCCESS"
+	eventQueryWarn      watchEventKind = "QUERY_WARN"
+	eventQueryErr       watchEventKind = "QUERY_ERR"
+	eventExhausted      watchEventKind = "EXHAUSTED"
+	eventFailed         watchEventKind = "FAILED"
+	eventRetrying       watchEventKind = "RETRYING"
+	eventCommitURL      watchEventKind = "COMMIT_URL"
+	eventAllOK          watchEventKind = "ALL_OK"
+	eventScopeOK        watchEventKind = "SCOPE_OK"
+)
+
 const runMismatchRetryThreshold = 3
+const defaultQueryErrorThreshold = 5
 const defaultNotifyRowsPerMessage = 12
 const maxNotifyMarkdownBytes = 3800 // limit 4k
+const notifySendTimeout = 10 * time.Second
+const probePipelineTimeout = 20 * time.Second
+const recoverProbeTimeout = 10 * time.Second
+const ghAnnotationTimeout = 8 * time.Second
+const chunkEstimatePage = 99
 
 func newWatchCmd() *cobra.Command {
 	opts := watchOptions{}
@@ -188,44 +233,44 @@ func runWatch(opts watchOptions) error {
 	var finalTriggeredAt *time.Time
 	allSucceededNotified := false
 	finalDisabledResident := false
-	emit := func(kind, msg string, fields logrus.Fields) {
-		logEvent(log, kind, msg, fields)
-		renderer.AddEvent(kind, msg)
+	emit := func(kind watchEventKind, msg string, fields logrus.Fields) {
+		logEvent(log, string(kind), msg, fields)
+		renderer.AddEvent(string(kind), msg)
 
 		event := ""
 		switch kind {
-		case "EXHAUSTED":
-			event = "component_exhausted"
-		case "TIMEOUT":
-			event = "global_timeout"
+		case eventExhausted:
+			event = notify.EventComponentExhausted
+		case eventTimeout:
+			event = notify.EventGlobalTimeout
 		}
 		if event != "" {
-			notifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			notifyCtx, cancel := context.WithTimeout(context.Background(), notifySendTimeout)
 			if err := wecom.Notify(notifyCtx, event, msg); err != nil {
-				logEvent(log, "NOTIFY_ERR", err.Error(), logrus.Fields{"error": err.Error()})
+				logEvent(log, string(eventNotifyErr), err.Error(), logrus.Fields{"error": err.Error()})
 			}
 			cancel()
 		}
 	}
 
 	if scopedMode {
-		emit("RECOVER_SKIP", "scoped watch mode: skip state recovery", nil)
+		emit(eventRecoverSkip, "scoped watch mode: skip state recovery", nil)
 	} else if loaded, err := store.Load(); err == nil {
 		recoverFromState(ctx, log, mode, tracked, loaded, cfg.Root.Connection.Kubeconfig, cfg.Root.Connection.Context)
-		emit("RECOVER", "recovered from existing state file", nil)
+		emit(eventRecover, "recovered from existing state file", nil)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		emit("RECOVER_WARN", fmt.Sprintf("state recovery skipped: %v", err), logrus.Fields{"error": err.Error()})
+		emit(eventRecoverWarn, fmt.Sprintf("state recovery skipped: %v", err), logrus.Fields{"error": err.Error()})
 	}
 
 	if err := store.Save(buildState(startedAt, tracked, finalTriggered, finalTriggeredAt)); err != nil {
 		return fmt.Errorf("save initial state: %w", err)
 	}
-	emit("INIT", fmt.Sprintf("watching %d components", len(tracked)), logrus.Fields{"components": fmt.Sprintf("%d", len(tracked))})
-	emit("PROBE_MODE", fmt.Sprintf("probe mode=%s", mode), logrus.Fields{"mode": string(mode)})
+	emit(eventInit, fmt.Sprintf("watching %d components", len(tracked)), logrus.Fields{"components": fmt.Sprintf("%d", len(tracked))})
+	emit(eventProbeMode, fmt.Sprintf("probe mode=%s", mode), logrus.Fields{"mode": string(mode)})
 	if scopedMode {
-		emit("SCOPE", "single-component watch mode enabled (DAG ignored, final_action disabled)", nil)
+		emit(eventScope, "single-component watch mode enabled (DAG ignored, final_action disabled)", nil)
 	} else if !finalActionEnabled {
-		emit("FINAL_DISABLED", "global disable_final_action is enabled, skip final_action trigger", nil)
+		emit(eventFinalDisabled, "global disable_final_action is enabled, skip final_action trigger", nil)
 	}
 	emitCommitURLsOnce(cfg, tracked, emit)
 
@@ -235,7 +280,7 @@ func runWatch(opts watchOptions) error {
 	firstCheckDone := false
 	processTick := func() (bool, error) {
 		if err := watchOnce(ctx, log, cfg, ghc, dag, tracked, mode, opts.dryRun, emit); err != nil {
-			emit("WATCH_ERR", err.Error(), logrus.Fields{"error": err.Error()})
+			emit(eventWatchErr, err.Error(), logrus.Fields{"error": err.Error()})
 		}
 		if !firstCheckDone {
 			firstCheckDone = true
@@ -248,36 +293,36 @@ func runWatch(opts watchOptions) error {
 		rows := toRows(tracked, cfg.Root.Connection.GitHubOrg)
 		if allSucceeded && !allSucceededNotified {
 			now := time.Now().UTC()
-			kind := "ALL_OK"
+			kind := eventAllOK
 			msg := "all components succeeded"
 			if scopedMode {
-				kind = "SCOPE_OK"
+				kind = eventScopeOK
 				msg = "scoped watch target succeeded"
 			}
 			emit(kind, msg, nil)
 			branch := successSummaryBranch(scopedMode, opts.finalBranch, cfg, tracked, finalActionEnabled)
-			if err := notifyMarkdownInChunks(context.Background(), wecom, "all_succeeded", rows, notifyRowsPerMessage, func(chunk []tui.Row, page, total int) string {
+			if err := notifyMarkdownInChunks(context.Background(), wecom, notify.EventAllSucceeded, rows, notifyRowsPerMessage, func(chunk []tui.Row, page, total int) string {
 				return buildFinalOKMarkdown(branch, startedAt, now, chunk, page, total)
 			}); err != nil {
-				emit("NOTIFY_ERR", err.Error(), logrus.Fields{"error": err.Error()})
+				emit(eventNotifyErr, err.Error(), logrus.Fields{"error": err.Error()})
 			}
 			allSucceededNotified = true
 		}
 
 		if scopedMode && exitAfterFinal && allSucceeded {
 			renderer.Render(rows)
-			emit("SCOPE_DONE", "scoped watch target succeeded, exiting", nil)
+			emit(eventScopeDone, "scoped watch target succeeded, exiting", nil)
 			return true, nil
 		}
 
 		if !scopedMode && !finalActionEnabled && allSucceeded {
 			if exitAfterFinal {
 				renderer.Render(rows)
-				emit("ALL_DONE", "all components succeeded, final_action disabled, exiting", nil)
+				emit(eventAllDone, "all components succeeded, final_action disabled, exiting", nil)
 				return true, nil
 			}
 			if !finalDisabledResident {
-				emit("FINAL_RESIDENT", "all components succeeded, final_action disabled, keep watching for new runs", logrus.Fields{"exit_after_final_ok": "false"})
+				emit(eventFinalResident, "all components succeeded, final_action disabled, keep watching for new runs", logrus.Fields{"exit_after_final_ok": "false"})
 				finalDisabledResident = true
 			}
 		}
@@ -285,10 +330,10 @@ func runWatch(opts watchOptions) error {
 		if finalActionEnabled && !finalTriggered && allSucceeded {
 			branch, err := resolveFinalBranch(opts.finalBranch, cfg, tracked)
 			if err != nil {
-				emit("FINAL_ERR", err.Error(), logrus.Fields{"error": err.Error()})
+				emit(eventFinalErr, err.Error(), logrus.Fields{"error": err.Error()})
 			} else {
 				if opts.dryRun {
-					emit("DRY_FINAL", fmt.Sprintf("would trigger final_action on %s branch=%s", cfg.Root.FinalAction.Repo, branch), logrus.Fields{"repo": cfg.Root.FinalAction.Repo, "branch": branch})
+					emit(eventDryFinal, fmt.Sprintf("would trigger final_action on %s branch=%s", cfg.Root.FinalAction.Repo, branch), logrus.Fields{"repo": cfg.Root.FinalAction.Repo, "branch": branch})
 					finalTriggered = true
 					now := time.Now().UTC()
 					finalTriggeredAt = &now
@@ -297,35 +342,35 @@ func runWatch(opts watchOptions) error {
 						renderer.Render(rows)
 						return true, nil
 					}
-					emit("FINAL_RESIDENT", "final condition reached, keep watching for new runs", logrus.Fields{"exit_after_final_ok": "false"})
+					emit(eventFinalResident, "final condition reached, keep watching for new runs", logrus.Fields{"exit_after_final_ok": "false"})
 				} else {
 					if err := triggerFinalAction(ctx, ghc, cfg, branch); err != nil {
-						emit("FINAL_ERR", err.Error(), logrus.Fields{"error": err.Error(), "repo": cfg.Root.FinalAction.Repo, "branch": branch})
+						emit(eventFinalErr, err.Error(), logrus.Fields{"error": err.Error(), "repo": cfg.Root.FinalAction.Repo, "branch": branch})
 					} else {
 						finalTriggered = true
 						now := time.Now().UTC()
 						finalTriggeredAt = &now
-						emit("FINAL_OK", fmt.Sprintf("final_action triggered branch=%s", branch), logrus.Fields{"repo": cfg.Root.FinalAction.Repo, "branch": branch})
+						emit(eventFinalOK, fmt.Sprintf("final_action triggered branch=%s", branch), logrus.Fields{"repo": cfg.Root.FinalAction.Repo, "branch": branch})
 						_ = store.Save(buildState(startedAt, tracked, finalTriggered, finalTriggeredAt))
 						if exitAfterFinal {
 							renderer.Render(rows)
 							return true, nil
 						}
-						emit("FINAL_RESIDENT", "final_action triggered, keep watching for new runs", logrus.Fields{"exit_after_final_ok": "false"})
+						emit(eventFinalResident, "final_action triggered, keep watching for new runs", logrus.Fields{"exit_after_final_ok": "false"})
 					}
 				}
 			}
 		}
 
 		if err := store.Save(buildState(startedAt, tracked, finalTriggered, finalTriggeredAt)); err != nil {
-			emit("STATE_ERR", err.Error(), logrus.Fields{"error": err.Error()})
+			emit(eventStateErr, err.Error(), logrus.Fields{"error": err.Error()})
 		}
 		if pi := cfg.Root.Notification.ProgressInterval.Duration; pi > 0 && time.Since(lastProgressAt) >= pi {
-			emit("NOTIFY_PROGRESS", fmt.Sprintf("sending progress report elapsed=%s", time.Since(startedAt).Truncate(time.Second)), nil)
-			if err := notifyMarkdownInChunks(context.Background(), wecom, "progress_report", toRows(tracked, cfg.Root.Connection.GitHubOrg), notifyRowsPerMessage, func(chunk []tui.Row, page, total int) string {
+			emit(eventNotifyProgress, fmt.Sprintf("sending progress report elapsed=%s", time.Since(startedAt).Truncate(time.Second)), nil)
+			if err := notifyMarkdownInChunks(context.Background(), wecom, notify.EventProgressReport, toRows(tracked, cfg.Root.Connection.GitHubOrg), notifyRowsPerMessage, func(chunk []tui.Row, page, total int) string {
 				return buildProgressMarkdown(chunk, startedAt, time.Now().UTC(), page, total)
 			}); err != nil {
-				emit("NOTIFY_ERR", err.Error(), logrus.Fields{"error": err.Error()})
+				emit(eventNotifyErr, err.Error(), logrus.Fields{"error": err.Error()})
 			}
 			lastProgressAt = time.Now()
 		}
@@ -342,12 +387,12 @@ func runWatch(opts watchOptions) error {
 	for {
 		select {
 		case <-ctx.Done():
-			emit("TIMEOUT", "global timeout reached or context cancelled", logrus.Fields{"reason": ctx.Err().Error()})
+			emit(eventTimeout, "global timeout reached or context cancelled", logrus.Fields{"reason": ctx.Err().Error()})
 			markTimeout(tracked)
 			_ = store.Save(buildState(startedAt, tracked, finalTriggered, finalTriggeredAt))
 			return ctx.Err()
 		case <-sigCh:
-			emit("EXIT", "received stop signal, saving state", nil)
+			emit(eventExit, "received stop signal, saving state", nil)
 			return store.Save(buildState(startedAt, tracked, finalTriggered, finalTriggeredAt))
 		case <-ticker.C:
 			if done, err := processTick(); err != nil {
@@ -622,7 +667,7 @@ func expandRuntimeDependencies(components []config.LoadedComponent, raw map[stri
 	return out
 }
 
-func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig, ghc *gh.Client, dag *resolver.DAG, tracked map[string]*trackedComponent, mode probeMode, dryRun bool, emit func(kind, msg string, fields logrus.Fields)) error {
+func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig, ghc *gh.Client, dag *resolver.DAG, tracked map[string]*trackedComponent, mode probeMode, dryRun bool, emit func(kind watchEventKind, msg string, fields logrus.Fields)) error {
 	succeeded := succeededMap(tracked)
 	log.WithFields(logrus.Fields{
 		"components": fmt.Sprintf("%d", len(tracked)),
@@ -636,7 +681,7 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 			}).Debug("component blocked by dependency DAG")
 			for _, p := range c.Pipelines {
 				if !isTerminal(p.Status) {
-					p.Status = "pending"
+					p.Status = pipestatus.StatusPending
 				}
 			}
 			continue
@@ -644,7 +689,7 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 
 		for _, p := range c.Pipelines {
 			// Backoff state: waiting for the timer to fire before triggering retry.
-			if p.Status == "backoff" {
+			if p.Status == pipestatus.StatusBackoff {
 				if p.RetryAfter != nil && !time.Now().Before(*p.RetryAfter) {
 					sha, err := ghc.BranchSHA(ctx, c.Repo, c.Branch)
 					if err != nil {
@@ -654,7 +699,7 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 					body := strings.ReplaceAll(p.RetryCmd, "{branch}", c.Branch)
 					attempt := p.RetryCount + 1
 					if dryRun {
-						emit("DRY_RETRY", fmt.Sprintf("would comment on %s@%s: %s", c.Repo, sha[:8], body), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": sha, "attempt": fmt.Sprintf("%d", attempt)})
+						emit(eventDryRetry, fmt.Sprintf("would comment on %s@%s: %s", c.Repo, sha[:8], body), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": sha, "attempt": fmt.Sprintf("%d", attempt)})
 					} else {
 						if err := ghc.CreateCommitComment(ctx, c.Repo, sha, body); err != nil {
 							return fmt.Errorf("trigger retry for %s/%s: %w", c.Name, p.Name, err)
@@ -663,13 +708,13 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 					settleAfter := time.Now().Add(cfg.Root.Retry.RetrySettleDelay.Duration)
 					p.SettleAfter = &settleAfter
 					p.RetryAfter = nil
-					p.Status = "settling"
+					p.Status = pipestatus.StatusSettling
 				}
 				continue
 			}
 
 			// Settling state: waiting for the new PipelineRun to be created.
-			if p.Status == "settling" {
+			if p.Status == pipestatus.StatusSettling {
 				if p.SettleAfter != nil && !time.Now().Before(*p.SettleAfter) {
 					ns, run, err := retrier.RediscoverPipelineRun(ctx, ghc, c.Repo, c.SHA, p.Name)
 					if err != nil {
@@ -678,17 +723,17 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 					p.Namespace = ns
 					p.PipelineRun = run
 					p.RetryCount++
-					p.Status = "watching"
-					p.Conclusion = "unknown"
+					p.Status = pipestatus.StatusWatching
+					p.Conclusion = pipestatus.ConclusionUnknown
 					p.SettleAfter = nil
-					emit("RETRY_OK", fmt.Sprintf("%s/%s new_run=%s", c.Name, p.Name, run), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "attempt": fmt.Sprintf("%d", p.RetryCount), "reason": "rediscovered"})
+					emit(eventRetryOK, fmt.Sprintf("%s/%s new_run=%s", c.Name, p.Name, run), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "attempt": fmt.Sprintf("%d", p.RetryCount), "reason": "rediscovered"})
 				}
 				continue
 			}
 
 			if useKubectlProbe(mode) && (p.Namespace == "" || p.PipelineRun == "") {
-				p.Status = "watching"
-				p.Conclusion = "unknown"
+				p.Status = pipestatus.StatusWatching
+				p.Conclusion = pipestatus.ConclusionUnknown
 				continue
 			}
 
@@ -697,7 +742,7 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 				probeErr error
 			)
 			if useKubectlProbe(mode) {
-				probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+				probeCtx, cancel := context.WithTimeout(ctx, probePipelineTimeout)
 				res, probeErr = watcher.ProbePipelineRun(probeCtx, p.Namespace, p.PipelineRun, cfg.Root.Connection.Kubeconfig, cfg.Root.Connection.Context)
 				cancel()
 				if probeErr != nil {
@@ -713,7 +758,7 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 						res = fallback
 						probeErr = nil
 						checksURL := commitChecksURL(cfg.Root.Connection.GitHubOrg, c.Repo, c.SHA)
-						emit("GH_FALLBACK", ghFallbackEventMessage(cfg.Root.Connection.GitHubOrg, c.Repo, c.SHA), logrus.Fields{
+						emit(eventGHFallback, ghFallbackEventMessage(cfg.Root.Connection.GitHubOrg, c.Repo, c.SHA), logrus.Fields{
 							"component": c.Name,
 							"branch":    c.Branch,
 							"pipeline":  p.Name,
@@ -748,11 +793,11 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 				}
 			}
 
-			status, nextErrs := watcher.DeriveStatusFromProbe(probeErr, res, p.QueryErrors, 5)
+			status, nextErrs := watcher.DeriveStatusFromProbe(probeErr, res, p.QueryErrors, defaultQueryErrorThreshold)
 			p.QueryErrors = nextErrs
-			if status == "running" && res.Reason == "gh_fallback_run_mismatch" {
+			if status == pipestatus.StatusRunning && res.Reason == "gh_fallback_run_mismatch" {
 				p.RunMismatch++
-				emit("RUN_MISMATCH", fmt.Sprintf("%s/%s run mismatch (%d/%d), current_run=%s", c.Name, p.Name, p.RunMismatch, runMismatchRetryThreshold, p.PipelineRun), logrus.Fields{
+				emit(eventRunMismatch, fmt.Sprintf("%s/%s run mismatch (%d/%d), current_run=%s", c.Name, p.Name, p.RunMismatch, runMismatchRetryThreshold, p.PipelineRun), logrus.Fields{
 					"component": c.Name,
 					"branch":    c.Branch,
 					"pipeline":  p.Name,
@@ -760,10 +805,10 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 					"reason":    "gh_fallback_run_mismatch",
 				})
 				if p.RunMismatch >= runMismatchRetryThreshold {
-					status = "failed"
+					status = pipestatus.StatusFailed
 					res.Reason = "gh_fallback_run_mismatch"
 					p.RunMismatch = 0
-					emit("RUN_STALE", fmt.Sprintf("%s/%s run mismatch persisted, force retry", c.Name, p.Name), logrus.Fields{
+					emit(eventRunStale, fmt.Sprintf("%s/%s run mismatch persisted, force retry", c.Name, p.Name), logrus.Fields{
 						"component": c.Name,
 						"branch":    c.Branch,
 						"pipeline":  p.Name,
@@ -776,40 +821,40 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 			}
 
 			switch status {
-			case "succeeded":
-				if p.Status != "succeeded" {
+			case pipestatus.StatusSucceeded:
+				if p.Status != pipestatus.StatusSucceeded {
 					now := time.Now().UTC()
 					p.CompletedAt = &now
 					if sha, err := ghc.BranchSHA(ctx, c.Repo, c.Branch); err == nil {
 						c.SHA = sha
 					}
-					emit("SUCCESS", fmt.Sprintf("%s/%s", c.Name, p.Name), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA})
+					emit(eventSuccess, fmt.Sprintf("%s/%s", c.Name, p.Name), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA})
 				}
-				p.Status = "succeeded"
-				p.Conclusion = "success"
+				p.Status = pipestatus.StatusSucceeded
+				p.Conclusion = pipestatus.ConclusionSuccess
 
-			case "running", "watching":
+			case pipestatus.StatusRunning, pipestatus.StatusWatching:
 				p.Status = status
 				if probeErr != nil {
-					emit("QUERY_WARN", fmt.Sprintf("%s/%s query failed (%d): %v", c.Name, p.Name, p.QueryErrors, probeErr), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "error": probeErr.Error()})
+					emit(eventQueryWarn, fmt.Sprintf("%s/%s query failed (%d): %v", c.Name, p.Name, p.QueryErrors, probeErr), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "error": probeErr.Error()})
 				}
 
-			case "query_error":
-				p.Status = "query_error"
-				emit("QUERY_ERR", fmt.Sprintf("%s/%s exceeded query error threshold", c.Name, p.Name), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "reason": "query_error_threshold"})
+			case pipestatus.StatusQueryErr:
+				p.Status = pipestatus.StatusQueryErr
+				emit(eventQueryErr, fmt.Sprintf("%s/%s exceeded query error threshold", c.Name, p.Name), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "reason": "query_error_threshold"})
 
-			case "failed":
-				p.Conclusion = "failure"
+			case pipestatus.StatusFailed:
+				p.Conclusion = pipestatus.ConclusionFailure
 				retryLimitEnabled := cfg.Root.Retry.MaxRetries > 0
 				if retryLimitEnabled && p.RetryCount >= cfg.Root.Retry.MaxRetries {
-					if p.Status != "exhausted" {
-						emit("EXHAUSTED", fmt.Sprintf("%s/%s retries exhausted", c.Name, p.Name), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "attempt": fmt.Sprintf("%d", p.RetryCount)})
+					if p.Status != pipestatus.StatusExhausted {
+						emit(eventExhausted, fmt.Sprintf("%s/%s retries exhausted", c.Name, p.Name), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "attempt": fmt.Sprintf("%d", p.RetryCount)})
 					}
-					p.Status = "exhausted"
+					p.Status = pipestatus.StatusExhausted
 					continue
 				}
-				p.Status = "failed"
-				emit("FAILED", fmt.Sprintf("%s/%s failed, retry_count=%d", c.Name, p.Name, p.RetryCount), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "reason": res.Reason})
+				p.Status = pipestatus.StatusFailed
+				emit(eventFailed, fmt.Sprintf("%s/%s failed, retry_count=%d", c.Name, p.Name, p.RetryCount), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "reason": res.Reason})
 
 				attempt := p.RetryCount + 1
 				backoff := retrier.BackoffDuration(
@@ -818,10 +863,10 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 					cfg.Root.Retry.Backoff.Max.Duration,
 					attempt,
 				)
-				emit("RETRYING", fmt.Sprintf("%s/%s attempt=%d backoff=%s", c.Name, p.Name, attempt, backoff), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "attempt": fmt.Sprintf("%d", attempt)})
+				emit(eventRetrying, fmt.Sprintf("%s/%s attempt=%d backoff=%s", c.Name, p.Name, attempt, backoff), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "attempt": fmt.Sprintf("%d", attempt)})
 				retryAfter := time.Now().Add(backoff)
 				p.RetryAfter = &retryAfter
-				p.Status = "backoff"
+				p.Status = pipestatus.StatusBackoff
 			}
 		}
 	}
@@ -841,8 +886,8 @@ func toTracked(cfg config.RuntimeConfig, rs []component.RuntimeComponent) (map[s
 		for _, p := range r.Pipelines {
 			byName[r.Name].Pipelines[p.Name] = &trackedPipeline{
 				Name:        p.Name,
-				Status:      p.Status,
-				Conclusion:  p.Conclusion,
+				Status:      pipestatus.Status(p.Status),
+				Conclusion:  pipestatus.Conclusion(p.Conclusion),
 				Namespace:   p.Namespace,
 				PipelineRun: p.PipelineRun,
 			}
@@ -857,7 +902,7 @@ func toTracked(cfg config.RuntimeConfig, rs []component.RuntimeComponent) (map[s
 		for _, p := range c.Pipelines {
 			tp, ok := tc.Pipelines[p.Name]
 			if !ok {
-				tp = &trackedPipeline{Name: p.Name, Status: "missing", Conclusion: "-"}
+				tp = &trackedPipeline{Name: p.Name, Status: pipestatus.StatusMissing, Conclusion: "-"}
 				tc.Pipelines[p.Name] = tp
 			}
 			tp.RetryCmd = p.RetryCommand
@@ -901,9 +946,9 @@ func buildState(startedAt time.Time, tracked map[string]*trackedComponent, final
 	return out
 }
 
-func isTerminal(status string) bool {
+func isTerminal(status pipestatus.Status) bool {
 	switch status {
-	case "succeeded", "exhausted", "blocked", "timeout":
+	case pipestatus.StatusSucceeded, pipestatus.StatusExhausted, pipestatus.StatusBlocked, pipestatus.StatusTimeout:
 		return true
 	default:
 		return false
@@ -915,7 +960,7 @@ func succeededMap(tracked map[string]*trackedComponent) map[string]bool {
 	for _, c := range tracked {
 		ok := true
 		for _, p := range c.Pipelines {
-			if p.Status != "succeeded" {
+			if p.Status != pipestatus.StatusSucceeded {
 				ok = false
 				break
 			}
@@ -974,7 +1019,7 @@ func markTimeout(tracked map[string]*trackedComponent) {
 			if isTerminal(p.Status) {
 				continue
 			}
-			p.Status = "timeout"
+			p.Status = pipestatus.StatusTimeout
 		}
 	}
 }
@@ -1012,7 +1057,7 @@ func recoverFromState(ctx context.Context, log *logrus.Logger, mode probeMode, t
 			}
 
 			if useKubectlProbe(mode) && tp.PipelineRun != "" && tp.Namespace != "" {
-				probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				probeCtx, cancel := context.WithTimeout(ctx, recoverProbeTimeout)
 				_, err := watcher.ProbePipelineRun(probeCtx, tp.Namespace, tp.PipelineRun, kubeconfig, kubeContext)
 				cancel()
 				if err == nil {
@@ -1065,7 +1110,7 @@ func toRows(tracked map[string]*trackedComponent, org string) []tui.Row {
 	return rows
 }
 
-func emitCommitURLsOnce(cfg config.RuntimeConfig, tracked map[string]*trackedComponent, emit func(kind, msg string, fields logrus.Fields)) {
+func emitCommitURLsOnce(cfg config.RuntimeConfig, tracked map[string]*trackedComponent, emit func(kind watchEventKind, msg string, fields logrus.Fields)) {
 	names := make([]string, 0, len(tracked))
 	for name := range tracked {
 		names = append(names, name)
@@ -1079,7 +1124,7 @@ func emitCommitURLsOnce(cfg config.RuntimeConfig, tracked map[string]*trackedCom
 			continue
 		}
 		url := commitChecksURL(org, c.Repo, c.SHA)
-		emit("COMMIT_URL", fmt.Sprintf("%s checks: %s", c.Name, url), logrus.Fields{
+		emit(eventCommitURL, fmt.Sprintf("%s checks: %s", c.Name, url), logrus.Fields{
 			"component": c.Name,
 			"branch":    c.Branch,
 			"repo":      c.Repo,
@@ -1146,13 +1191,13 @@ func fallbackProbeFromGH(ctx context.Context, ghc *gh.Client, c *trackedComponen
 	lookup := func(sha string) (watcher.ProbeResult, error) {
 		probeWithAnnotations := func(r gh.CheckRun) watcher.ProbeResult {
 			base := watcher.ProbeFromCheckRun(r.Status, r.Conclusion)
-			if base.Status != "succeeded" {
+			if base.Status != pipestatus.StatusSucceeded {
 				return base
 			}
 			if r.ID <= 0 || r.Output.AnnotationsCount <= 0 {
 				return base
 			}
-			annotationsCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			annotationsCtx, cancel := context.WithTimeout(ctx, ghAnnotationTimeout)
 			defer cancel()
 			annotations, err := ghc.CheckRunAnnotations(annotationsCtx, c.Repo, r.ID)
 			if err != nil {
@@ -1160,7 +1205,7 @@ func fallbackProbeFromGH(ctx context.Context, ghc *gh.Client, c *trackedComponen
 			}
 			for _, a := range annotations {
 				if strings.EqualFold(strings.TrimSpace(a.AnnotationLevel), "failure") {
-					return watcher.ProbeResult{Status: "failed", Reason: "gh_fallback_annotation_failure", Conclusion: "failure"}
+					return watcher.ProbeResult{Status: pipestatus.StatusFailed, Reason: "gh_fallback_annotation_failure", Conclusion: pipestatus.ConclusionFailure}
 				}
 			}
 			return base
@@ -1176,10 +1221,10 @@ func fallbackProbeFromGH(ctx context.Context, ghc *gh.Client, c *trackedComponen
 			}
 			if r, ok := component.FindPipelineCheckRun(runs, pipeline); ok {
 				inferred := probeWithAnnotations(r)
-				if inferred.Status == "failed" {
+				if inferred.Status == pipestatus.StatusFailed {
 					return inferred, nil
 				}
-				return watcher.ProbeResult{Status: "running", Reason: "gh_fallback_run_mismatch", Conclusion: "unknown"}, nil
+				return watcher.ProbeResult{Status: pipestatus.StatusRunning, Reason: "gh_fallback_run_mismatch", Conclusion: pipestatus.ConclusionUnknown}, nil
 			}
 			return watcher.ProbeResult{}, fmt.Errorf("pipeline %q not found in GH check-runs", pipeline)
 		}
@@ -1257,7 +1302,7 @@ func notifyMarkdownInChunks(ctx context.Context, wecom *notify.Wecom, event stri
 	total := len(chunks)
 	for i, chunk := range chunks {
 		content := build(chunk, i+1, total)
-		notifyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		notifyCtx, cancel := context.WithTimeout(ctx, notifySendTimeout)
 		err := wecom.NotifyMarkdown(notifyCtx, event, content)
 		cancel()
 		if err != nil {
@@ -1292,7 +1337,7 @@ func chunkRowsByConstraints(rows []tui.Row, maxRows, maxBytes int, build func(ch
 		lastFit := i
 		for end := i + 1; end <= len(rows) && (end-i) <= maxRows; end++ {
 			candidate := rows[i:end]
-			estimate := build(candidate, 99, 99)
+			estimate := build(candidate, chunkEstimatePage, chunkEstimatePage)
 			if len(estimate) > maxBytes {
 				break
 			}
@@ -1331,9 +1376,9 @@ func eventLevel(kind string) logrus.Level {
 		return logrus.ErrorLevel
 	case strings.HasSuffix(k, "_WARN"):
 		return logrus.WarnLevel
-	case k == "FAILED" || k == "EXHAUSTED" || k == "TIMEOUT":
+	case k == string(eventFailed) || k == string(eventExhausted) || k == string(eventTimeout):
 		return logrus.ErrorLevel
-	case k == "GH_FALLBACK" || k == "RUN_MISMATCH":
+	case k == string(eventGHFallback) || k == string(eventRunMismatch):
 		return logrus.WarnLevel
 	default:
 		return logrus.InfoLevel

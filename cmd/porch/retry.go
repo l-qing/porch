@@ -12,6 +12,7 @@ import (
 	"porch/pkg/component"
 	"porch/pkg/config"
 	"porch/pkg/gh"
+	pipestatus "porch/pkg/pipeline"
 	"porch/pkg/watcher"
 )
 
@@ -194,5 +195,5 @@ func shouldSkipRetryBySuccess(checkRuns []gh.CheckRun, pipeline string) bool {
 	if !ok {
 		return false
 	}
-	return watcher.ProbeFromCheckRun(run.Status, run.Conclusion).Status == "succeeded"
+	return watcher.ProbeFromCheckRun(run.Status, run.Conclusion).Status == pipestatus.StatusSucceeded
 }

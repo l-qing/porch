@@ -11,6 +11,7 @@ import (
 
 	"porch/pkg/config"
 	"porch/pkg/gh"
+	pipestatus "porch/pkg/pipeline"
 	"porch/pkg/resolver"
 
 	"github.com/sirupsen/logrus"
@@ -45,7 +46,7 @@ func TestFallbackProbeFromGHSelectsParentCheckRun(t *testing.T) {
 	if source != "gh_current_sha" {
 		t.Fatalf("source = %q, want gh_current_sha", source)
 	}
-	if res.Status != "failed" || res.Conclusion != "failure" {
+	if res.Status != pipestatus.StatusFailed || res.Conclusion != pipestatus.ConclusionFailure {
 		t.Fatalf("unexpected fallback probe result: %+v", res)
 	}
 }
@@ -71,7 +72,7 @@ func TestFallbackProbeFromGHMatchesFullRun(t *testing.T) {
 	if source != "gh_current_sha" {
 		t.Fatalf("source = %q, want gh_current_sha", source)
 	}
-	if res.Status != "succeeded" || res.Conclusion != "success" || res.Reason != "gh_fallback" {
+	if res.Status != pipestatus.StatusSucceeded || res.Conclusion != pipestatus.ConclusionSuccess || res.Reason != "gh_fallback" {
 		t.Fatalf("unexpected fallback probe result: %+v", res)
 	}
 }
@@ -97,7 +98,7 @@ func TestFallbackProbeFromGHRunMismatchReturnsRunning(t *testing.T) {
 	if source != "gh_current_sha" {
 		t.Fatalf("source = %q, want gh_current_sha", source)
 	}
-	if res.Status != "running" || res.Conclusion != "unknown" || res.Reason != "gh_fallback_run_mismatch" {
+	if res.Status != pipestatus.StatusRunning || res.Conclusion != pipestatus.ConclusionUnknown || res.Reason != "gh_fallback_run_mismatch" {
 		t.Fatalf("unexpected fallback probe result: %+v", res)
 	}
 }
@@ -125,7 +126,7 @@ func TestFallbackProbeFromGHUsesFailureAnnotations(t *testing.T) {
 	if source != "gh_current_sha" {
 		t.Fatalf("source = %q, want gh_current_sha", source)
 	}
-	if res.Status != "failed" || res.Conclusion != "failure" || res.Reason != "gh_fallback_annotation_failure" {
+	if res.Status != pipestatus.StatusFailed || res.Conclusion != pipestatus.ConclusionFailure || res.Reason != "gh_fallback_annotation_failure" {
 		t.Fatalf("unexpected fallback probe result: %+v", res)
 	}
 }
@@ -237,19 +238,19 @@ func TestWatchOnceGHOnlySkipsKubectl(t *testing.T) {
 					Name:        "catalog-all-in-one",
 					Namespace:   "devops",
 					PipelineRun: "catalog-all-in-one-abc12",
-					Status:      "watching",
+					Status:      pipestatus.StatusWatching,
 				},
 			},
 		},
 	}
-	emit := func(string, string, logrus.Fields) {}
+	emit := func(watchEventKind, string, logrus.Fields) {}
 
 	if err := watchOnce(context.Background(), logrus.New(), cfg, ghc, dag, tracked, probeModeGHOnly, true, emit); err != nil {
 		t.Fatalf("watchOnce error: %v", err)
 	}
 
 	gotStatus := tracked["catalog"].Pipelines["catalog-all-in-one"].Status
-	if gotStatus != "succeeded" {
+	if gotStatus != pipestatus.StatusSucceeded {
 		t.Fatalf("status = %q, want succeeded", gotStatus)
 	}
 
@@ -298,15 +299,15 @@ func TestWatchOnceExhaustedNotificationOnlyOnce(t *testing.T) {
 			Pipelines: map[string]*trackedPipeline{
 				"to-all-in-one": {
 					Name:       "to-all-in-one",
-					Status:     "watching",
+					Status:     pipestatus.StatusWatching,
 					RetryCount: 1,
 				},
 			},
 		},
 	}
 	exhaustedCount := 0
-	emit := func(kind, _ string, _ logrus.Fields) {
-		if kind == "EXHAUSTED" {
+	emit := func(kind watchEventKind, _ string, _ logrus.Fields) {
+		if kind == eventExhausted {
 			exhaustedCount++
 		}
 	}
@@ -320,7 +321,7 @@ func TestWatchOnceExhaustedNotificationOnlyOnce(t *testing.T) {
 	if exhaustedCount != 1 {
 		t.Fatalf("exhausted notifications = %d, want 1", exhaustedCount)
 	}
-	if got := tracked["tektoncd-operator"].Pipelines["to-all-in-one"].Status; got != "exhausted" {
+	if got := tracked["tektoncd-operator"].Pipelines["to-all-in-one"].Status; got != pipestatus.StatusExhausted {
 		t.Fatalf("status = %q, want exhausted", got)
 	}
 }
@@ -365,15 +366,15 @@ func TestWatchOnceMaxRetriesZeroDisablesExhaustedThreshold(t *testing.T) {
 			Pipelines: map[string]*trackedPipeline{
 				"to-all-in-one": {
 					Name:       "to-all-in-one",
-					Status:     "watching",
+					Status:     pipestatus.StatusWatching,
 					RetryCount: 7,
 				},
 			},
 		},
 	}
 	exhaustedCount := 0
-	emit := func(kind, _ string, _ logrus.Fields) {
-		if kind == "EXHAUSTED" {
+	emit := func(kind watchEventKind, _ string, _ logrus.Fields) {
+		if kind == eventExhausted {
 			exhaustedCount++
 		}
 	}
@@ -383,7 +384,7 @@ func TestWatchOnceMaxRetriesZeroDisablesExhaustedThreshold(t *testing.T) {
 	}
 
 	p := tracked["tektoncd-operator"].Pipelines["to-all-in-one"]
-	if p.Status != "backoff" {
+	if p.Status != pipestatus.StatusBackoff {
 		t.Fatalf("status = %q, want backoff", p.Status)
 	}
 	if p.RetryAfter == nil {

@@ -1,6 +1,10 @@
 package state
 
-import "time"
+import (
+	"time"
+
+	pipestatus "porch/pkg/pipeline"
+)
 
 type File struct {
 	Version     int                  `json:"version"`
@@ -23,11 +27,11 @@ type Component struct {
 }
 
 type PipelineState struct {
-	Status      string     `json:"status"`
-	PipelineRun string     `json:"pipelinerun_name"`
-	RetryCount  int        `json:"retry_count"`
-	LastRetryAt *time.Time `json:"last_retry_at"`
-	CompletedAt *time.Time `json:"completed_at"`
-	RetryAfter  *time.Time `json:"retry_after,omitempty"`
-	SettleAfter *time.Time `json:"settle_after,omitempty"`
+	Status      pipestatus.Status `json:"status"`
+	PipelineRun string            `json:"pipelinerun_name"`
+	RetryCount  int               `json:"retry_count"`
+	LastRetryAt *time.Time        `json:"last_retry_at"`
+	CompletedAt *time.Time        `json:"completed_at"`
+	RetryAfter  *time.Time        `json:"retry_after,omitempty"`
+	SettleAfter *time.Time        `json:"settle_after,omitempty"`
 }

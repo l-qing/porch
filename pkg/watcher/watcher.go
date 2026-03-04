@@ -1,6 +1,8 @@
 package watcher
 
-func DeriveStatusFromProbe(probeErr error, result ProbeResult, consecutiveQueryErrors, threshold int) (status string, nextErrors int) {
+import pipestatus "porch/pkg/pipeline"
+
+func DeriveStatusFromProbe(probeErr error, result ProbeResult, consecutiveQueryErrors, threshold int) (status pipestatus.Status, nextErrors int) {
 	if threshold <= 0 {
 		threshold = 5
 	}
@@ -8,20 +10,20 @@ func DeriveStatusFromProbe(probeErr error, result ProbeResult, consecutiveQueryE
 	if probeErr != nil {
 		nextErrors = consecutiveQueryErrors + 1
 		if nextErrors >= threshold {
-			return "query_error", nextErrors
+			return pipestatus.StatusQueryErr, nextErrors
 		}
-		return "watching", nextErrors
+		return pipestatus.StatusWatching, nextErrors
 	}
 
 	nextErrors = 0
 	switch result.Status {
-	case "succeeded":
-		return "succeeded", nextErrors
-	case "failed":
-		return "failed", nextErrors
-	case "running":
-		return "running", nextErrors
+	case pipestatus.StatusSucceeded:
+		return pipestatus.StatusSucceeded, nextErrors
+	case pipestatus.StatusFailed:
+		return pipestatus.StatusFailed, nextErrors
+	case pipestatus.StatusRunning:
+		return pipestatus.StatusRunning, nextErrors
 	default:
-		return "watching", nextErrors
+		return pipestatus.StatusWatching, nextErrors
 	}
 }

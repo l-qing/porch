@@ -1,19 +1,23 @@
 package watcher
 
-import "testing"
+import (
+	"testing"
+
+	pipestatus "porch/pkg/pipeline"
+)
 
 func TestProbeFromCheckRun(t *testing.T) {
 	tests := []struct {
 		status     string
 		conclusion string
-		wantStatus string
-		wantConc   string
+		wantStatus pipestatus.Status
+		wantConc   pipestatus.Conclusion
 	}{
-		{status: "completed", conclusion: "success", wantStatus: "succeeded", wantConc: "success"},
-		{status: "completed", conclusion: "failure", wantStatus: "failed", wantConc: "failure"},
-		{status: "completed", conclusion: "cancelled", wantStatus: "failed", wantConc: "failure"},
-		{status: "in_progress", conclusion: "", wantStatus: "running", wantConc: "unknown"},
-		{status: "queued", conclusion: "", wantStatus: "running", wantConc: "unknown"},
+		{status: "completed", conclusion: "success", wantStatus: pipestatus.StatusSucceeded, wantConc: pipestatus.ConclusionSuccess},
+		{status: "completed", conclusion: "failure", wantStatus: pipestatus.StatusFailed, wantConc: pipestatus.ConclusionFailure},
+		{status: "completed", conclusion: "cancelled", wantStatus: pipestatus.StatusFailed, wantConc: pipestatus.ConclusionFailure},
+		{status: "in_progress", conclusion: "", wantStatus: pipestatus.StatusRunning, wantConc: pipestatus.ConclusionUnknown},
+		{status: "queued", conclusion: "", wantStatus: pipestatus.StatusRunning, wantConc: pipestatus.ConclusionUnknown},
 	}
 
 	for _, tc := range tests {

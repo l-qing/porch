@@ -6,13 +6,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	pipestatus "porch/pkg/pipeline"
 )
 
 type Row struct {
 	Component string
 	Branch    string
 	Pipeline  string
-	Status    string
+	Status    pipestatus.Status
 	Retries   int
 	Run       string
 	CommitURL string
@@ -113,31 +115,31 @@ func TerminalTable(rows []Row) string {
 	return sb.String()
 }
 
-func renderStatus(status string) string {
+func renderStatus(status pipestatus.Status) string {
 	switch status {
-	case "succeeded":
+	case pipestatus.StatusSucceeded:
 		return "OK"
-	case "running", "watching":
+	case pipestatus.StatusRunning, pipestatus.StatusWatching:
 		return "RUN"
-	case "failed":
+	case pipestatus.StatusFailed:
 		return "FAIL"
-	case "exhausted":
+	case pipestatus.StatusExhausted:
 		return "EXHAUSTED"
-	case "pending":
+	case pipestatus.StatusPending:
 		return "PENDING"
-	case "query_error":
+	case pipestatus.StatusQueryErr:
 		return "QUERY_ERR"
-	case "timeout":
+	case pipestatus.StatusTimeout:
 		return "TIMEOUT"
 	default:
-		return strings.ToUpper(status)
+		return strings.ToUpper(status.String())
 	}
 }
 
 func countSucceeded(rows []Row) int {
 	n := 0
 	for _, r := range rows {
-		if r.Status == "succeeded" {
+		if r.Status == pipestatus.StatusSucceeded {
 			n++
 		}
 	}
