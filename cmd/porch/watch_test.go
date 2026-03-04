@@ -244,8 +244,17 @@ func TestWatchOnceGHOnlySkipsKubectl(t *testing.T) {
 		},
 	}
 	emit := func(watchEventKind, string, logrus.Fields) {}
+	deps := watchOnceDeps{
+		log:    logrus.New(),
+		cfg:    cfg,
+		ghc:    ghc,
+		dag:    dag,
+		mode:   probeModeGHOnly,
+		dryRun: true,
+		emit:   emit,
+	}
 
-	if err := watchOnce(context.Background(), logrus.New(), cfg, ghc, dag, tracked, probeModeGHOnly, true, emit); err != nil {
+	if err := watchOnce(context.Background(), tracked, deps); err != nil {
 		t.Fatalf("watchOnce error: %v", err)
 	}
 
@@ -256,6 +265,75 @@ func TestWatchOnceGHOnlySkipsKubectl(t *testing.T) {
 
 	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("kubectl should not be called in gh-only mode")
+	}
+}
+
+func TestWatchOnceStopsImmediatelyWhenStopRequested(t *testing.T) {
+	stop := false
+	calls := 0
+	runner := fakeRunner{fn: func(args ...string) ([]byte, []byte, error) {
+		calls++
+		stop = true
+		return nil, []byte("signal: interrupt"), errors.New("exit status 1")
+	}}
+
+	ghc := gh.NewClient("TestGroup", runner)
+	cfg := config.RuntimeConfig{
+		Root: config.Root{
+			Connection: config.Connection{
+				GitHubOrg: "TestGroup",
+			},
+		},
+	}
+	dag, err := resolver.New([]config.LoadedComponent{{Name: "catalog"}}, map[string]config.Depends{})
+	if err != nil {
+		t.Fatalf("build dag: %v", err)
+	}
+	tracked := map[string]*trackedComponent{
+		"catalog": {
+			Name:   "catalog",
+			Repo:   "catalog",
+			Branch: "main",
+			SHA:    "abc123",
+			Pipelines: map[string]*trackedPipeline{
+				"catalog-all-in-one": {
+					Name:        "catalog-all-in-one",
+					Namespace:   "devops",
+					PipelineRun: "catalog-all-in-one-abc12",
+					Status:      pipestatus.StatusWatching,
+				},
+			},
+		},
+	}
+	queryWarnCount := 0
+	emit := func(kind watchEventKind, _ string, _ logrus.Fields) {
+		if kind == eventQueryWarn {
+			queryWarnCount++
+		}
+	}
+	shouldStop := func() bool {
+		return stop
+	}
+	deps := watchOnceDeps{
+		log:        logrus.New(),
+		cfg:        cfg,
+		ghc:        ghc,
+		dag:        dag,
+		mode:       probeModeGHOnly,
+		dryRun:     true,
+		emit:       emit,
+		shouldStop: shouldStop,
+	}
+
+	err = watchOnce(context.Background(), tracked, deps)
+	if !errors.Is(err, errWatchStopRequested) {
+		t.Fatalf("error = %v, want errWatchStopRequested", err)
+	}
+	if calls != 1 {
+		t.Fatalf("gh calls = %d, want 1", calls)
+	}
+	if queryWarnCount != 0 {
+		t.Fatalf("query warn count = %d, want 0", queryWarnCount)
 	}
 }
 
@@ -311,9 +389,18 @@ func TestWatchOnceExhaustedNotificationOnlyOnce(t *testing.T) {
 			exhaustedCount++
 		}
 	}
+	deps := watchOnceDeps{
+		log:    logrus.New(),
+		cfg:    cfg,
+		ghc:    ghc,
+		dag:    dag,
+		mode:   probeModeGHOnly,
+		dryRun: true,
+		emit:   emit,
+	}
 
 	for i := 0; i < 2; i++ {
-		if err := watchOnce(context.Background(), logrus.New(), cfg, ghc, dag, tracked, probeModeGHOnly, true, emit); err != nil {
+		if err := watchOnce(context.Background(), tracked, deps); err != nil {
 			t.Fatalf("watchOnce error: %v", err)
 		}
 	}
@@ -378,8 +465,17 @@ func TestWatchOnceMaxRetriesZeroDisablesExhaustedThreshold(t *testing.T) {
 			exhaustedCount++
 		}
 	}
+	deps := watchOnceDeps{
+		log:    logrus.New(),
+		cfg:    cfg,
+		ghc:    ghc,
+		dag:    dag,
+		mode:   probeModeGHOnly,
+		dryRun: true,
+		emit:   emit,
+	}
 
-	if err := watchOnce(context.Background(), logrus.New(), cfg, ghc, dag, tracked, probeModeGHOnly, true, emit); err != nil {
+	if err := watchOnce(context.Background(), tracked, deps); err != nil {
 		t.Fatalf("watchOnce error: %v", err)
 	}
 

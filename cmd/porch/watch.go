@@ -111,6 +111,8 @@ const recoverProbeTimeout = 10 * time.Second
 const ghAnnotationTimeout = 8 * time.Second
 const chunkEstimatePage = 99
 
+var errWatchStopRequested = errors.New("watch stop requested")
+
 func newWatchCmd() *cobra.Command {
 	opts := watchOptions{}
 	cmd := &cobra.Command{
@@ -165,6 +167,19 @@ func runWatch(opts watchOptions) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
+	stopRequested := false
+	pollStopSignal := func() bool {
+		if stopRequested {
+			return true
+		}
+		select {
+		case <-sigCh:
+			stopRequested = true
+			return true
+		default:
+			return false
+		}
+	}
 
 	ghc := gh.NewClient(cfg.Root.Connection.GitHubOrg, nil)
 	if shouldSkipPatternResolutionForAdHocScope(cfg.Components, opts) {
@@ -278,8 +293,22 @@ func runWatch(opts watchOptions) error {
 	defer ticker.Stop()
 	lastProgressAt := time.Now()
 	firstCheckDone := false
+	onceDeps := watchOnceDeps{
+		log:        log,
+		cfg:        cfg,
+		ghc:        ghc,
+		dag:        dag,
+		mode:       mode,
+		dryRun:     opts.dryRun,
+		shouldStop: pollStopSignal,
+		emit:       emit,
+	}
 	processTick := func() (bool, error) {
-		if err := watchOnce(ctx, log, cfg, ghc, dag, tracked, mode, opts.dryRun, emit); err != nil {
+		if err := watchOnce(ctx, tracked, onceDeps); err != nil {
+			if errors.Is(err, errWatchStopRequested) {
+				emit(eventExit, "received stop signal, saving state", nil)
+				return true, store.Save(buildState(startedAt, tracked, finalTriggered, finalTriggeredAt))
+			}
 			emit(eventWatchErr, err.Error(), logrus.Fields{"error": err.Error()})
 		}
 		if !firstCheckDone {
@@ -387,11 +416,16 @@ func runWatch(opts watchOptions) error {
 	for {
 		select {
 		case <-ctx.Done():
+			if stopRequested {
+				emit(eventExit, "received stop signal, saving state", nil)
+				return store.Save(buildState(startedAt, tracked, finalTriggered, finalTriggeredAt))
+			}
 			emit(eventTimeout, "global timeout reached or context cancelled", logrus.Fields{"reason": ctx.Err().Error()})
 			markTimeout(tracked)
 			_ = store.Save(buildState(startedAt, tracked, finalTriggered, finalTriggeredAt))
 			return ctx.Err()
 		case <-sigCh:
+			stopRequested = true
 			emit(eventExit, "received stop signal, saving state", nil)
 			return store.Save(buildState(startedAt, tracked, finalTriggered, finalTriggeredAt))
 		case <-ticker.C:
@@ -667,13 +701,41 @@ func expandRuntimeDependencies(components []config.LoadedComponent, raw map[stri
 	return out
 }
 
-func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig, ghc *gh.Client, dag *resolver.DAG, tracked map[string]*trackedComponent, mode probeMode, dryRun bool, emit func(kind watchEventKind, msg string, fields logrus.Fields)) error {
+type watchOnceDeps struct {
+	log        *logrus.Logger
+	cfg        config.RuntimeConfig
+	ghc        *gh.Client
+	dag        *resolver.DAG
+	mode       probeMode
+	dryRun     bool
+	shouldStop func() bool
+	emit       func(kind watchEventKind, msg string, fields logrus.Fields)
+}
+
+func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps watchOnceDeps) error {
+	log := deps.log
+	cfg := deps.cfg
+	ghc := deps.ghc
+	dag := deps.dag
+	mode := deps.mode
+	dryRun := deps.dryRun
+	emit := deps.emit
+	isStopping := func() bool {
+		if deps.shouldStop != nil && deps.shouldStop() {
+			return true
+		}
+		return false
+	}
+
 	succeeded := succeededMap(tracked)
 	log.WithFields(logrus.Fields{
 		"components": fmt.Sprintf("%d", len(tracked)),
 		"dry_run":    fmt.Sprintf("%t", dryRun),
 	}).Debug("watch tick start")
 	for _, c := range tracked {
+		if isStopping() {
+			return errWatchStopRequested
+		}
 		if !dag.IsReady(c.Name, succeeded) {
 			log.WithFields(logrus.Fields{
 				"component": c.Name,
@@ -688,11 +750,17 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 		}
 
 		for _, p := range c.Pipelines {
+			if isStopping() {
+				return errWatchStopRequested
+			}
 			// Backoff state: waiting for the timer to fire before triggering retry.
 			if p.Status == pipestatus.StatusBackoff {
 				if p.RetryAfter != nil && !time.Now().Before(*p.RetryAfter) {
 					sha, err := ghc.BranchSHA(ctx, c.Repo, c.Branch)
 					if err != nil {
+						if isStopping() {
+							return errWatchStopRequested
+						}
 						return fmt.Errorf("refresh branch sha for %s: %w", c.Name, err)
 					}
 					c.SHA = sha
@@ -702,6 +770,9 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 						emit(eventDryRetry, fmt.Sprintf("would comment on %s@%s: %s", c.Repo, sha[:8], body), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": sha, "attempt": fmt.Sprintf("%d", attempt)})
 					} else {
 						if err := ghc.CreateCommitComment(ctx, c.Repo, sha, body); err != nil {
+							if isStopping() {
+								return errWatchStopRequested
+							}
 							return fmt.Errorf("trigger retry for %s/%s: %w", c.Name, p.Name, err)
 						}
 					}
@@ -718,6 +789,9 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 				if p.SettleAfter != nil && !time.Now().Before(*p.SettleAfter) {
 					ns, run, err := retrier.RediscoverPipelineRun(ctx, ghc, c.Repo, c.SHA, p.Name)
 					if err != nil {
+						if isStopping() {
+							return errWatchStopRequested
+						}
 						return fmt.Errorf("rediscover pipeline run for %s/%s: %w", c.Name, p.Name, err)
 					}
 					p.Namespace = ns
@@ -794,6 +868,9 @@ func watchOnce(ctx context.Context, log *logrus.Logger, cfg config.RuntimeConfig
 			}
 
 			status, nextErrs := watcher.DeriveStatusFromProbe(probeErr, res, p.QueryErrors, defaultQueryErrorThreshold)
+			if isStopping() {
+				return errWatchStopRequested
+			}
 			p.QueryErrors = nextErrs
 			if status == pipestatus.StatusRunning && res.Reason == "gh_fallback_run_mismatch" {
 				p.RunMismatch++
