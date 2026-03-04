@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -30,15 +32,20 @@ func (ExecRunner) Run(ctx context.Context, args ...string) ([]byte, []byte, erro
 }
 
 type Client struct {
-	org    string
-	runner Runner
+	org          string
+	runner       Runner
+	retryBackoff []time.Duration
 }
 
 func NewClient(org string, runner Runner) *Client {
 	if runner == nil {
 		runner = ExecRunner{}
 	}
-	return &Client{org: org, runner: runner}
+	return &Client{
+		org:          org,
+		runner:       runner,
+		retryBackoff: []time.Duration{300 * time.Millisecond, 1 * time.Second, 2 * time.Second},
+	}
 }
 
 func (c *Client) run(ctx context.Context, args ...string) ([]byte, []byte, error) {
@@ -49,20 +56,55 @@ func (c *Client) run(ctx context.Context, args ...string) ([]byte, []byte, error
 		"cmd":  "gh " + strings.Join(safe, " "),
 	}).Debug("exec external command")
 
-	out, errOut, err := c.runner.Run(ctx, args...)
-	fields := logrus.Fields{
-		"tool":    "gh",
-		"cmd":     "gh " + strings.Join(safe, " "),
-		"elapsed": time.Since(start).Truncate(time.Millisecond).String(),
-	}
-	if err != nil {
-		fields["error"] = err.Error()
+	maxAttempts := len(c.retryBackoff) + 1
+	var (
+		out    []byte
+		errOut []byte
+		err    error
+	)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		out, errOut, err = c.runner.Run(ctx, args...)
+		if err == nil {
+			logrus.WithFields(logrus.Fields{
+				"tool":    "gh",
+				"cmd":     "gh " + strings.Join(safe, " "),
+				"elapsed": time.Since(start).Truncate(time.Millisecond).String(),
+				"attempt": fmt.Sprintf("%d/%d", attempt, maxAttempts),
+			}).Debug("external command done")
+			return out, errOut, nil
+		}
+		if attempt < maxAttempts && isTransientGHError(errOut, err) && ctx.Err() == nil {
+			retryAfter := c.retryBackoff[attempt-1]
+			fields := logrus.Fields{
+				"tool":        "gh",
+				"cmd":         "gh " + strings.Join(safe, " "),
+				"elapsed":     time.Since(start).Truncate(time.Millisecond).String(),
+				"attempt":     fmt.Sprintf("%d/%d", attempt, maxAttempts),
+				"retry_after": retryAfter.String(),
+				"error":       err.Error(),
+			}
+			if msg := strings.TrimSpace(string(errOut)); msg != "" {
+				fields["stderr"] = summarize(msg, 240)
+			}
+			logrus.WithFields(fields).Warn("external command failed, will retry")
+			if sleepErr := sleepWithContext(ctx, retryAfter); sleepErr != nil {
+				return out, errOut, sleepErr
+			}
+			continue
+		}
+
+		fields := logrus.Fields{
+			"tool":    "gh",
+			"cmd":     "gh " + strings.Join(safe, " "),
+			"elapsed": time.Since(start).Truncate(time.Millisecond).String(),
+			"attempt": fmt.Sprintf("%d/%d", attempt, maxAttempts),
+			"error":   err.Error(),
+		}
 		if msg := strings.TrimSpace(string(errOut)); msg != "" {
 			fields["stderr"] = summarize(msg, 240)
 		}
 		logrus.WithFields(fields).Debug("external command failed")
-	} else {
-		logrus.WithFields(fields).Debug("external command done")
+		return out, errOut, err
 	}
 	return out, errOut, err
 }
@@ -193,4 +235,60 @@ func commandError(cmd []string, stderr []byte, runErr error) error {
 		return fmt.Errorf("command %q failed: %w", strings.Join(cmd, " "), runErr)
 	}
 	return fmt.Errorf("command %q failed: %v: %s", strings.Join(cmd, " "), runErr, msg)
+}
+
+var transientHTTPStatusPattern = regexp.MustCompile(`\bhttp\s+5\d\d\b`)
+
+func isTransientGHError(stderr []byte, runErr error) bool {
+	if runErr == nil {
+		return false
+	}
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(string(stderr)))
+	if errText := strings.ToLower(strings.TrimSpace(runErr.Error())); errText != "" {
+		if text != "" {
+			text += " "
+		}
+		text += errText
+	}
+	if text == "" {
+		return false
+	}
+	if transientHTTPStatusPattern.MatchString(text) {
+		return true
+	}
+	transientTokens := []string{
+		"bad gateway",
+		"service unavailable",
+		"gateway timeout",
+		"timeout",
+		"timed out",
+		"connection reset",
+		"connection refused",
+		"temporary failure",
+		"tls handshake timeout",
+		"unexpected eof",
+	}
+	for _, token := range transientTokens {
+		if strings.Contains(text, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
