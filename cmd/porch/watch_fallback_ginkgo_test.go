@@ -23,7 +23,9 @@ var _ = Describe("watchOnce GH fallback for missing runtime run", func() {
 		checkRunsPayload string
 		expectedStatus   pipestatus.Status
 		expectRetry      bool
+		expectSuccess    bool
 		expectedGHCalls  int
+		expectedRun      string
 	}
 
 	DescribeTable("uses GH check-runs when pipeline run name is missing",
@@ -97,6 +99,8 @@ var _ = Describe("watchOnce GH fallback for missing runtime run", func() {
 
 			p := tracked["tektoncd-operator@release-4.6"].Pipelines["to-all-in-one"]
 			Expect(p.Status).To(Equal(tc.expectedStatus))
+			Expect(p.PipelineRun).To(Equal(tc.expectedRun))
+			Expect(p.Namespace).To(Equal("devops"))
 			if tc.expectRetry {
 				Expect(events[eventFailed]).To(Equal(1))
 				Expect(events[eventRetrying]).To(Equal(1))
@@ -104,7 +108,7 @@ var _ = Describe("watchOnce GH fallback for missing runtime run", func() {
 				Expect(p.RetryAfter).To(BeNil())
 				Expect(p.SettleAfter).NotTo(BeNil())
 			} else {
-				Expect(events[eventSuccess]).To(Equal(1))
+				Expect(events[eventSuccess] > 0).To(Equal(tc.expectSuccess))
 				Expect(p.RetryAfter).To(BeNil())
 			}
 		},
@@ -113,14 +117,27 @@ var _ = Describe("watchOnce GH fallback for missing runtime run", func() {
 			checkRunsPayload: `{"check_runs":[{"id":12,"name":"Pipelines as Code CI / to-all-in-one","status":"completed","conclusion":"failure","details_url":"https://x/workspace/devops~business-build~devops/pipeline/pipelineRuns/detail/to-all-in-one-abc12"}]}`,
 			expectedStatus:   pipestatus.StatusSettling,
 			expectRetry:      true,
-			expectedGHCalls:  2,
+			expectSuccess:    false,
+			expectedGHCalls:  3,
+			expectedRun:      "to-all-in-one-abc12",
 		}),
 		Entry("successful check-run should become succeeded", testCase{
 			description:      "should mark pipeline succeeded when GH reports success",
 			checkRunsPayload: `{"check_runs":[{"id":13,"name":"Pipelines as Code CI / to-all-in-one","status":"completed","conclusion":"success","details_url":"https://x/workspace/devops~business-build~devops/pipeline/pipelineRuns/detail/to-all-in-one-xyz99"}]}`,
 			expectedStatus:   pipestatus.StatusSucceeded,
 			expectRetry:      false,
+			expectSuccess:    true,
+			expectedGHCalls:  3,
+			expectedRun:      "to-all-in-one-xyz99",
+		}),
+		Entry("in-progress check-run should keep running and still discover run", testCase{
+			description:      "should keep pipeline running while runtime location is discovered",
+			checkRunsPayload: `{"check_runs":[{"id":14,"name":"Pipelines as Code CI / to-all-in-one","status":"in_progress","conclusion":"","details_url":"https://x/workspace/devops~business-build~devops/pipeline/pipelineRuns/detail/to-all-in-one-k9x3f-build-image"}]}`,
+			expectedStatus:   pipestatus.StatusRunning,
+			expectRetry:      false,
+			expectSuccess:    false,
 			expectedGHCalls:  2,
+			expectedRun:      "to-all-in-one-k9x3f",
 		}),
 	)
 })

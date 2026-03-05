@@ -910,6 +910,30 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 					if err == nil {
 						res = fallback
 						probeErr = nil
+						discoveredNS, discoveredRun, discoveredSource, discoverErr := discoverRuntimeLocationFromGH(ctx, ghc, c, p.Name)
+						if discoverErr == nil {
+							if strings.TrimSpace(p.Namespace) == "" && strings.TrimSpace(discoveredNS) != "" {
+								p.Namespace = discoveredNS
+							}
+							if strings.TrimSpace(p.PipelineRun) == "" && strings.TrimSpace(discoveredRun) != "" {
+								p.PipelineRun = discoveredRun
+							}
+							log.WithFields(logrus.Fields{
+								"component": c.Name,
+								"pipeline":  p.Name,
+								"namespace": normalize(p.Namespace),
+								"run":       normalize(p.PipelineRun),
+								"sha":       c.SHA,
+								"reason":    discoveredSource,
+							}).Debug("discovered runtime location from github check-run")
+						} else {
+							log.WithFields(logrus.Fields{
+								"component": c.Name,
+								"pipeline":  p.Name,
+								"sha":       c.SHA,
+								"error":     discoverErr.Error(),
+							}).Debug("failed to discover runtime location from github check-run")
+						}
 						checksURL := commitChecksURL(cfg.Root.Connection.GitHubOrg, c.Repo, c.SHA)
 						msg := "pipeline run missing, fallback to GH check-run"
 						if checksURL != "" {
@@ -1521,6 +1545,48 @@ func fallbackProbeFromGH(ctx context.Context, ghc *gh.Client, c *trackedComponen
 		return watcher.ProbeResult{}, "", err
 	}
 	return res, "gh_refreshed_sha", nil
+}
+
+func discoverRuntimeLocationFromGH(ctx context.Context, ghc *gh.Client, c *trackedComponent, pipeline string) (string, string, string, error) {
+	lookup := func(sha string) (string, string, bool, error) {
+		runs, err := ghc.CheckRuns(ctx, c.Repo, sha)
+		if err != nil {
+			return "", "", false, err
+		}
+		r, ok := component.FindPipelineCheckRun(runs, pipeline)
+		if !ok {
+			return "", "", false, nil
+		}
+		namespace, run, _ := component.ParseDetailsURLForPipeline(r.DetailsURL, pipeline)
+		if strings.TrimSpace(run) == "" {
+			run = component.PipelineRunFromCheckRun(r, pipeline)
+		}
+		if strings.TrimSpace(run) == "" {
+			return "", "", false, nil
+		}
+		return namespace, run, true, nil
+	}
+
+	if namespace, run, ok, err := lookup(c.SHA); err == nil && ok {
+		return namespace, run, "gh_location_current_sha", nil
+	} else if err != nil {
+		return "", "", "", err
+	}
+
+	sha, err := refreshRuntimeSHA(ctx, ghc, c)
+	if err != nil {
+		return "", "", "", err
+	}
+	c.SHA = sha
+
+	namespace, run, ok, err := lookup(c.SHA)
+	if err != nil {
+		return "", "", "", err
+	}
+	if !ok {
+		return "", "", "", fmt.Errorf("pipeline %q location not found in GH check-runs", pipeline)
+	}
+	return namespace, run, "gh_location_refreshed_sha", nil
 }
 
 func shouldRefreshPRStatusFromGH(c *trackedComponent, mode probeMode, probeErr error, kubectlResult watcher.ProbeResult) bool {
