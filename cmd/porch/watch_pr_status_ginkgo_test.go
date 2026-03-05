@@ -25,6 +25,7 @@ var _ = Describe("watchOnce PR status preference", func() {
 		description         string
 		kubectlPayload      string
 		checkRunsPayload    string
+		expectedGHCalls     int
 		expectedStatus      pipestatus.Status
 		expectedFailedEvent int
 		expectedRetryEvent  int
@@ -52,6 +53,9 @@ var _ = Describe("watchOnce PR status preference", func() {
 				joined := strings.Join(args, " ")
 				if joined == "api repos/TestGroup/catalog/commits/abc123/check-runs" {
 					return []byte(tc.checkRunsPayload), nil, nil
+				}
+				if joined == "api repos/TestGroup/catalog/pulls/686" {
+					return []byte(`{"number":686,"state":"open","head":{"ref":"feat/add-golang-task","sha":"abc123"}}`), nil, nil
 				}
 				return nil, []byte("unexpected args"), errors.New("unexpected")
 			}})
@@ -106,7 +110,7 @@ var _ = Describe("watchOnce PR status preference", func() {
 				emit:   emit,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ghCalls).To(Equal(1))
+			Expect(ghCalls).To(Equal(tc.expectedGHCalls))
 			Expect(events[eventGHFallback]).To(Equal(tc.expectedGHFallback))
 			Expect(events[eventFailed]).To(Equal(tc.expectedFailedEvent))
 			Expect(events[eventRetrying]).To(Equal(tc.expectedRetryEvent))
@@ -116,7 +120,8 @@ var _ = Describe("watchOnce PR status preference", func() {
 			description:         "kubectl still reports running but PR check-run is failed",
 			kubectlPayload:      `{"status":{"conditions":[{"type":"Succeeded","status":"Unknown","reason":"Running"}]}}`,
 			checkRunsPayload:    `{"check_runs":[{"id":220,"name":"Pipelines as Code CI / catalog-all-in-one","status":"completed","conclusion":"failure","details_url":"https://x/workspace/devops~business-build~devops/pipeline/pipelineRuns/detail/catalog-all-in-one-wzmt7-build-msmtp-image"}]}`,
-			expectedStatus:      pipestatus.StatusBackoff,
+			expectedGHCalls:     2,
+			expectedStatus:      pipestatus.StatusSettling,
 			expectedFailedEvent: 1,
 			expectedRetryEvent:  1,
 			expectedGHFallback:  1,
@@ -125,6 +130,7 @@ var _ = Describe("watchOnce PR status preference", func() {
 			description:         "kubectl running and PR check-run running should stay running",
 			kubectlPayload:      `{"status":{"conditions":[{"type":"Succeeded","status":"Unknown","reason":"Running"}]}}`,
 			checkRunsPayload:    `{"check_runs":[{"id":221,"name":"Pipelines as Code CI / catalog-all-in-one","status":"in_progress","conclusion":"","details_url":"https://x/workspace/devops~business-build~devops/pipeline/pipelineRuns/detail/catalog-all-in-one-wzmt7-build-msmtp-image"}]}`,
+			expectedGHCalls:     1,
 			expectedStatus:      pipestatus.StatusRunning,
 			expectedFailedEvent: 0,
 			expectedRetryEvent:  0,

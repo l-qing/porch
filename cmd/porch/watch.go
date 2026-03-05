@@ -866,30 +866,12 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 			// Backoff state: waiting for the timer to fire before triggering retry.
 			if p.Status == pipestatus.StatusBackoff {
 				if p.RetryAfter != nil && !time.Now().Before(*p.RetryAfter) {
-					sha, err := refreshRuntimeSHA(ctx, ghc, c)
-					if err != nil {
+					if err := triggerRetry(ctx, ghc, cfg, c, p, dryRun, emit); err != nil {
 						if isStopping() {
 							return errWatchStopRequested
 						}
-						return fmt.Errorf("refresh runtime sha for %s: %w", c.Name, err)
+						return fmt.Errorf("trigger retry for %s/%s: %w", c.Name, p.Name, err)
 					}
-					c.SHA = sha
-					body := strings.ReplaceAll(p.RetryCmd, "{branch}", c.Branch)
-					attempt := p.RetryCount + 1
-					if dryRun {
-						emit(eventDryRetry, fmt.Sprintf("would comment on %s: %s", retryDryTarget(c, sha), body), logrus.Fields{"component": c.Name, "branch": c.Branch, "pr": fmt.Sprintf("%d", c.PRNumber), "pipeline": p.Name, "sha": sha, "attempt": fmt.Sprintf("%d", attempt)})
-					} else {
-						if err := postRetryComment(ctx, ghc, c, sha, body); err != nil {
-							if isStopping() {
-								return errWatchStopRequested
-							}
-							return fmt.Errorf("trigger retry for %s/%s: %w", c.Name, p.Name, err)
-						}
-					}
-					settleAfter := time.Now().Add(cfg.Root.Retry.RetrySettleDelay.Duration)
-					p.SettleAfter = &settleAfter
-					p.RetryAfter = nil
-					p.Status = pipestatus.StatusSettling
 				}
 				continue
 			}
@@ -1103,6 +1085,16 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 					cfg.Root.Retry.Backoff.Max.Duration,
 					attempt,
 				)
+				if shouldRetryImmediatelyOnFirstFailure(p) {
+					emit(eventRetrying, fmt.Sprintf("%s/%s attempt=%d backoff=0s", c.Name, p.Name, attempt), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "attempt": fmt.Sprintf("%d", attempt), "reason": "first_failure_fast_path"})
+					if err := triggerRetry(ctx, ghc, cfg, c, p, dryRun, emit); err != nil {
+						if isStopping() {
+							return errWatchStopRequested
+						}
+						return fmt.Errorf("trigger retry for %s/%s: %w", c.Name, p.Name, err)
+					}
+					continue
+				}
 				emit(eventRetrying, fmt.Sprintf("%s/%s attempt=%d backoff=%s", c.Name, p.Name, attempt, backoff), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "attempt": fmt.Sprintf("%d", attempt)})
 				retryAfter := time.Now().Add(backoff)
 				p.RetryAfter = &retryAfter
@@ -1128,6 +1120,16 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 					cfg.Root.Retry.Backoff.Max.Duration,
 					attempt,
 				)
+				if shouldRetryImmediatelyOnFirstFailure(p) {
+					emit(eventRetrying, fmt.Sprintf("%s/%s attempt=%d backoff=0s", c.Name, p.Name, attempt), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "attempt": fmt.Sprintf("%d", attempt), "reason": "first_failure_fast_path"})
+					if err := triggerRetry(ctx, ghc, cfg, c, p, dryRun, emit); err != nil {
+						if isStopping() {
+							return errWatchStopRequested
+						}
+						return fmt.Errorf("trigger retry for %s/%s: %w", c.Name, p.Name, err)
+					}
+					continue
+				}
 				emit(eventRetrying, fmt.Sprintf("%s/%s attempt=%d backoff=%s", c.Name, p.Name, attempt, backoff), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "attempt": fmt.Sprintf("%d", attempt)})
 				retryAfter := time.Now().Add(backoff)
 				p.RetryAfter = &retryAfter
@@ -1554,11 +1556,57 @@ func shouldOverrideProbeResultWithPRStatus(current, gh watcher.ProbeResult) bool
 	return false
 }
 
+func shouldRetryImmediatelyOnFirstFailure(p *trackedPipeline) bool {
+	if p == nil {
+		return false
+	}
+	// Fast-path first failure so initial startup can recover without waiting for backoff ticks.
+	return p.RetryCount == 0
+}
+
+func triggerRetry(
+	ctx context.Context,
+	ghc *gh.Client,
+	cfg config.RuntimeConfig,
+	c *trackedComponent,
+	p *trackedPipeline,
+	dryRun bool,
+	emit func(kind watchEventKind, msg string, fields logrus.Fields),
+) error {
+	sha, err := refreshRuntimeSHA(ctx, ghc, c)
+	if err != nil {
+		return fmt.Errorf("refresh runtime sha: %w", err)
+	}
+	c.SHA = sha
+	body := strings.ReplaceAll(p.RetryCmd, "{branch}", c.Branch)
+	attempt := p.RetryCount + 1
+	if dryRun {
+		emit(eventDryRetry, fmt.Sprintf("would comment on %s: %s", retryDryTarget(c, sha), body), logrus.Fields{"component": c.Name, "branch": c.Branch, "pr": fmt.Sprintf("%d", c.PRNumber), "pipeline": p.Name, "sha": sha, "attempt": fmt.Sprintf("%d", attempt)})
+	} else {
+		if err := postRetryComment(ctx, ghc, c, sha, body); err != nil {
+			return err
+		}
+	}
+	settleAfter := time.Now().Add(cfg.Root.Retry.RetrySettleDelay.Duration)
+	p.SettleAfter = &settleAfter
+	p.RetryAfter = nil
+	p.Status = pipestatus.StatusSettling
+	return nil
+}
+
 func retryDryTarget(c *trackedComponent, sha string) string {
 	if c.PRNumber > 0 {
 		return fmt.Sprintf("%s#%d", c.Repo, c.PRNumber)
 	}
-	return fmt.Sprintf("%s@%s", c.Repo, sha[:8])
+	return fmt.Sprintf("%s@%s", c.Repo, shortSHA(sha))
+}
+
+func shortSHA(sha string) string {
+	s := strings.TrimSpace(sha)
+	if len(s) <= 8 {
+		return s
+	}
+	return s[:8]
 }
 
 func postRetryComment(ctx context.Context, ghc *gh.Client, c *trackedComponent, sha, body string) error {

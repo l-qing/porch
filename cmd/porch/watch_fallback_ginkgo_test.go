@@ -86,7 +86,7 @@ var _ = Describe("watchOnce GH fallback for missing runtime run", func() {
 				ghc:    ghc,
 				dag:    dag,
 				mode:   probeModeKubectlFirst,
-				dryRun: false,
+				dryRun: true,
 				emit:   emit,
 			}
 
@@ -100,7 +100,9 @@ var _ = Describe("watchOnce GH fallback for missing runtime run", func() {
 			if tc.expectRetry {
 				Expect(events[eventFailed]).To(Equal(1))
 				Expect(events[eventRetrying]).To(Equal(1))
-				Expect(p.RetryAfter).NotTo(BeNil())
+				Expect(events[eventDryRetry]).To(Equal(1))
+				Expect(p.RetryAfter).To(BeNil())
+				Expect(p.SettleAfter).NotTo(BeNil())
 			} else {
 				Expect(events[eventSuccess]).To(Equal(1))
 				Expect(p.RetryAfter).To(BeNil())
@@ -109,9 +111,9 @@ var _ = Describe("watchOnce GH fallback for missing runtime run", func() {
 		Entry("failed check-run should enter backoff retry", testCase{
 			description:      "should mark pipeline failed and schedule retry when GH reports failure",
 			checkRunsPayload: `{"check_runs":[{"id":12,"name":"Pipelines as Code CI / to-all-in-one","status":"completed","conclusion":"failure","details_url":"https://x/workspace/devops~business-build~devops/pipeline/pipelineRuns/detail/to-all-in-one-abc12"}]}`,
-			expectedStatus:   pipestatus.StatusBackoff,
+			expectedStatus:   pipestatus.StatusSettling,
 			expectRetry:      true,
-			expectedGHCalls:  1,
+			expectedGHCalls:  2,
 		}),
 		Entry("successful check-run should become succeeded", testCase{
 			description:      "should mark pipeline succeeded when GH reports success",

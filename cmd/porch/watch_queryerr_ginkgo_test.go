@@ -93,7 +93,7 @@ var _ = Describe("watchOnce query error escalation", func() {
 				ghc:    ghc,
 				dag:    dag,
 				mode:   probeModeGHOnly,
-				dryRun: false,
+				dryRun: true,
 				emit:   emit,
 			}
 
@@ -112,10 +112,10 @@ var _ = Describe("watchOnce query error escalation", func() {
 			description:      "retry is still available",
 			maxRetries:       0,
 			retryCount:       0,
-			expectedStatus:   pipestatus.StatusBackoff,
+			expectedStatus:   pipestatus.StatusSettling,
 			expectRetrying:   true,
 			expectExhausted:  false,
-			expectedGHCalls:  3,
+			expectedGHCalls:  4,
 			expectedFailed:   true,
 			expectedQueryErr: true,
 		}),
