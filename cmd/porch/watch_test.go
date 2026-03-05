@@ -611,6 +611,52 @@ func TestShouldSkipPatternResolutionForAdHocScope(t *testing.T) {
 	}
 }
 
+func TestSelectComponentsForPatternResolution(t *testing.T) {
+	components := []config.LoadedComponent{
+		{Name: "tektoncd-pipeline", Repo: "tektoncd-pipeline", BranchPatterns: []string{"^main$"}, Pipelines: []config.PipelineSpec{{Name: "tp-all-in-one"}}},
+		{Name: "tektoncd-hub", Repo: "tektoncd-hub", BranchPatterns: []string{"^main$"}, Pipelines: []config.PipelineSpec{{Name: "th-all-in-one"}}},
+	}
+
+	selected, skip := selectComponentsForPatternResolution(components, watchOptions{})
+	if skip {
+		t.Fatalf("expect skip=false without component scope")
+	}
+	if len(selected) != 2 {
+		t.Fatalf("selected len=%d, want 2", len(selected))
+	}
+
+	selected, skip = selectComponentsForPatternResolution(components, watchOptions{
+		componentName: "tektoncd-pipeline",
+	})
+	if skip {
+		t.Fatalf("expect skip=false when component exists")
+	}
+	if len(selected) != 1 || selected[0].Name != "tektoncd-pipeline" {
+		t.Fatalf("unexpected selected components: %+v", selected)
+	}
+
+	selected, skip = selectComponentsForPatternResolution(components, watchOptions{
+		componentName: "tektoncd-operator",
+		pipelineName:  "to-all-in-one",
+	})
+	if !skip {
+		t.Fatalf("expect skip=true for ad-hoc scoped watch")
+	}
+	if len(selected) != 2 {
+		t.Fatalf("selected len=%d, want original components len 2", len(selected))
+	}
+
+	selected, skip = selectComponentsForPatternResolution(components, watchOptions{
+		componentName: "tektoncd-operator",
+	})
+	if !skip {
+		t.Fatalf("expect skip=true when scoped component is unresolved")
+	}
+	if len(selected) != 2 {
+		t.Fatalf("selected len=%d, want original components len 2", len(selected))
+	}
+}
+
 func TestApplyWatchScopeBuildsAdHocComponentWhenMissingInConfig(t *testing.T) {
 	cfg := config.RuntimeConfig{
 		Components: []config.LoadedComponent{
@@ -920,5 +966,55 @@ func TestResolvePatternComponentsExpandsRegexBranches(t *testing.T) {
 		if _, ok := gotNames[want]; !ok {
 			t.Fatalf("missing expanded component %q, got=%v", want, gotNames)
 		}
+	}
+}
+
+func TestResolvePatternComponentsWithScopedSelectionOnlyListsSelectedRepo(t *testing.T) {
+	calls := 0
+	ghc := gh.NewClient("TestGroup", fakeRunner{fn: func(args ...string) ([]byte, []byte, error) {
+		joined := strings.Join(args, " ")
+		if joined != "api --paginate repos/TestGroup/catalog/branches?per_page=100 --jq .[].name" {
+			return nil, []byte("unexpected args"), errors.New("unexpected")
+		}
+		calls++
+		return []byte("main\nfeat/add-golang-task\nfeature-x\n"), nil, nil
+	}})
+	cfg := config.RuntimeConfig{
+		Components: []config.LoadedComponent{
+			{
+				Name:           "catalog",
+				Repo:           "catalog",
+				BranchPatterns: []string{"^main$"},
+				Pipelines:      []config.PipelineSpec{{Name: "catalog-all-in-one"}},
+			},
+			{
+				Name:           "tektoncd-pipeline",
+				Repo:           "tektoncd-pipeline",
+				BranchPatterns: []string{"^main$"},
+				Pipelines:      []config.PipelineSpec{{Name: "tp-all-in-one"}},
+			},
+		},
+	}
+
+	selected, skip := selectComponentsForPatternResolution(cfg.Components, watchOptions{
+		componentName: "catalog",
+	})
+	if skip {
+		t.Fatalf("unexpected skip=true")
+	}
+	cfg.Components = selected
+
+	resolved, err := resolvePatternComponents(context.Background(), cfg, ghc)
+	if err != nil {
+		t.Fatalf("resolvePatternComponents error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("ListBranches call count=%d, want 1", calls)
+	}
+	if got := len(resolved.Components); got != 1 {
+		t.Fatalf("resolved components len=%d, want 1", got)
+	}
+	if resolved.Components[0].Name != "catalog@main" {
+		t.Fatalf("unexpected component name=%q, want catalog@main", resolved.Components[0].Name)
 	}
 }

@@ -182,12 +182,14 @@ func runWatch(opts watchOptions) error {
 	}
 
 	ghc := gh.NewClient(cfg.Root.Connection.GitHubOrg, nil)
-	if shouldSkipPatternResolutionForAdHocScope(cfg.Components, opts) {
+	componentsForPattern, skipPatternResolution := selectComponentsForPatternResolution(cfg.Components, opts)
+	if skipPatternResolution {
 		log.WithFields(logrus.Fields{
 			"component_scope": normalize(strings.TrimSpace(opts.componentName)),
 			"pipeline_scope":  normalize(strings.TrimSpace(opts.pipelineName)),
-		}).Debug("skip global branch pattern expansion for ad-hoc scoped watch")
+		}).Debug("skip global branch pattern expansion for unresolved scoped watch")
 	} else {
+		cfg.Components = componentsForPattern
 		cfg, err = resolvePatternComponents(ctx, cfg, ghc)
 		if err != nil {
 			return err
@@ -528,6 +530,18 @@ func shouldSkipPatternResolutionForAdHocScope(components []config.LoadedComponen
 	}
 	selected := matchComponentsBySelector(components, componentName)
 	return len(selected) == 0
+}
+
+func selectComponentsForPatternResolution(components []config.LoadedComponent, opts watchOptions) ([]config.LoadedComponent, bool) {
+	componentName := strings.TrimSpace(opts.componentName)
+	if componentName == "" {
+		return components, false
+	}
+	selected := matchComponentsBySelector(components, componentName)
+	if len(selected) == 0 {
+		return components, true
+	}
+	return selected, false
 }
 
 func applyWatchScope(cfg *config.RuntimeConfig, opts watchOptions) (bool, error) {
