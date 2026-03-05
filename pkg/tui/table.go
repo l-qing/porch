@@ -152,6 +152,11 @@ func MarkdownTable(rows []Row) string {
 	sorted := make([]Row, len(rows))
 	copy(sorted, rows)
 	sort.Slice(sorted, func(i, j int) bool {
+		leftInProgress := isInProgressStatus(sorted[i].Status)
+		rightInProgress := isInProgressStatus(sorted[j].Status)
+		if leftInProgress != rightInProgress {
+			return leftInProgress
+		}
 		if sorted[i].Component == sorted[j].Component {
 			return sorted[i].Pipeline < sorted[j].Pipeline
 		}
@@ -184,4 +189,8 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func isInProgressStatus(status pipestatus.Status) bool {
+	return status == pipestatus.StatusRunning || status == pipestatus.StatusWatching
 }

@@ -948,8 +948,32 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 				}
 
 			case pipestatus.StatusQueryErr:
-				p.Status = pipestatus.StatusQueryErr
 				emit(eventQueryErr, fmt.Sprintf("%s/%s exceeded query error threshold", c.Name, p.Name), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "reason": "query_error_threshold"})
+				// Query error threshold means status cannot be trusted anymore.
+				// Escalate to failed path so retry policy can recover automatically.
+				p.Conclusion = pipestatus.ConclusionFailure
+				retryLimitEnabled := cfg.Root.Retry.MaxRetries > 0
+				if retryLimitEnabled && p.RetryCount >= cfg.Root.Retry.MaxRetries {
+					if p.Status != pipestatus.StatusExhausted {
+						emit(eventExhausted, fmt.Sprintf("%s/%s retries exhausted", c.Name, p.Name), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "attempt": fmt.Sprintf("%d", p.RetryCount)})
+					}
+					p.Status = pipestatus.StatusExhausted
+					continue
+				}
+				p.Status = pipestatus.StatusFailed
+				emit(eventFailed, fmt.Sprintf("%s/%s failed, retry_count=%d", c.Name, p.Name, p.RetryCount), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "reason": "query_error_threshold"})
+
+				attempt := p.RetryCount + 1
+				backoff := retrier.BackoffDuration(
+					cfg.Root.Retry.Backoff.Initial.Duration,
+					cfg.Root.Retry.Backoff.Multiplier,
+					cfg.Root.Retry.Backoff.Max.Duration,
+					attempt,
+				)
+				emit(eventRetrying, fmt.Sprintf("%s/%s attempt=%d backoff=%s", c.Name, p.Name, attempt, backoff), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "attempt": fmt.Sprintf("%d", attempt)})
+				retryAfter := time.Now().Add(backoff)
+				p.RetryAfter = &retryAfter
+				p.Status = pipestatus.StatusBackoff
 
 			case pipestatus.StatusFailed:
 				p.Conclusion = pipestatus.ConclusionFailure
