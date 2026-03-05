@@ -80,6 +80,7 @@ func printStatusTable(ctx context.Context, log *logrus.Logger, ghc *gh.Client, m
 	rows := make([]tui.Row, 0, len(components))
 	for _, c := range components {
 		for _, p := range c.Pipelines {
+			// Snapshot from initialization is the baseline; live probes can override it.
 			fallback := watcher.ProbeFromCheckRun(p.Status, p.Conclusion)
 			st := fallback.Status
 			if !useKubectlProbe(mode) {
@@ -108,6 +109,7 @@ func printStatusTable(ctx context.Context, log *logrus.Logger, ghc *gh.Client, m
 					source := "gh_snapshot"
 					if ghc != nil {
 						if ghProbe, ghSource, ghErr := fallbackProbeStatusFromGH(ctx, ghc, c, p.Name, p.PipelineRun); ghErr == nil {
+							// Prefer GH live status over stale initialization snapshot.
 							st = ghProbe.Status
 							source = ghSource
 						}

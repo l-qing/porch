@@ -42,8 +42,10 @@ func NewClient(org string, runner Runner) *Client {
 		runner = ExecRunner{}
 	}
 	return &Client{
-		org:          org,
-		runner:       runner,
+		org:    org,
+		runner: runner,
+		// Keep retries short to absorb transient GitHub/GH CLI failures
+		// without hiding persistent configuration/auth errors.
 		retryBackoff: []time.Duration{300 * time.Millisecond, 1 * time.Second, 2 * time.Second},
 	}
 }
@@ -73,6 +75,8 @@ func (c *Client) run(ctx context.Context, args ...string) ([]byte, []byte, error
 			}).Debug("external command done")
 			return out, errOut, nil
 		}
+		// Retry only transient failures; caller-facing behavior for permanent
+		// failures should stay deterministic and fail fast.
 		if attempt < maxAttempts && isTransientGHError(errOut, err) && ctx.Err() == nil {
 			retryAfter := c.retryBackoff[attempt-1]
 			fields := logrus.Fields{
@@ -214,6 +218,7 @@ func sanitizeArgs(args []string) []string {
 	safe := make([]string, 0, len(args))
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "body=") {
+			// Avoid leaking trigger commands into logs.
 			safe = append(safe, "body=<redacted>")
 			continue
 		}
@@ -244,6 +249,7 @@ func isTransientGHError(stderr []byte, runErr error) bool {
 		return false
 	}
 	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		// Context cancellation is a control signal, not a retryable error.
 		return false
 	}
 	text := strings.ToLower(strings.TrimSpace(string(stderr)))

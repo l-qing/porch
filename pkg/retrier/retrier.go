@@ -11,6 +11,7 @@ import (
 )
 
 func BackoffDuration(initial time.Duration, multiplier float64, max time.Duration, attempt int) time.Duration {
+	// Attempt starts from 1, so the first retry uses `initial` directly.
 	if attempt <= 1 {
 		if initial > max {
 			return max
@@ -20,6 +21,7 @@ func BackoffDuration(initial time.Duration, multiplier float64, max time.Duratio
 	if multiplier < 1 {
 		multiplier = 1
 	}
+	// Clamp the exponential result to max to prevent unbounded wait durations.
 	pow := math.Pow(multiplier, float64(attempt-1))
 	d := time.Duration(float64(initial) * pow)
 	if d > max {
@@ -33,6 +35,8 @@ func RediscoverPipelineRun(ctx context.Context, ghc *gh.Client, repo, sha, pipel
 	if err != nil {
 		return "", "", err
 	}
+	// Rediscovery intentionally ignores the previous run and picks the latest
+	// logical check-run for the pipeline on the current commit.
 	r, ok := component.FindPipelineCheckRun(runs, pipeline)
 	if !ok {
 		return "", "", fmt.Errorf("pipeline %q not found in check-runs", pipeline)

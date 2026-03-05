@@ -92,6 +92,7 @@ func runRetry(opts retryOptions) error {
 
 	checkRuns, err := ghc.CheckRuns(ctx, target.Repo, sha)
 	if err != nil {
+		// Manual retry should remain available even when status lookup is degraded.
 		logEvent(log, "RETRY_WARN", fmt.Sprintf("check-runs query failed, fallback to direct retry trigger: %v", err), logrus.Fields{
 			"component": target.Name,
 			"branch":    branch,
@@ -111,6 +112,8 @@ func runRetry(opts retryOptions) error {
 
 		if !opts.force && shouldSkipRetryBySuccess(checkRuns, p.Name) {
 			skippedSucceeded++
+			// Default behavior is conservative: do not retrigger already-successful
+			// pipeline unless user explicitly opts in with --force.
 			logEvent(log, "MANUAL_SKIP", "pipeline already succeeded on current commit, skip retry", logrus.Fields{
 				"component": target.Name,
 				"pipeline":  p.Name,

@@ -91,6 +91,8 @@ func ParseDetailsURLForPipeline(url, pipeline string) (namespace, pipelinerun, n
 	if pipelinerun == "" {
 		return namespace, pipelinerun, note
 	}
+	// Check-run details_url often points to child task runs.
+	// Normalize to the logical parent PipelineRun key used by watch/retry state.
 	return namespace, NormalizePipelineRunName(pipeline, pipelinerun), note
 }
 
@@ -147,6 +149,8 @@ func FindPipelineCheckRun(runs []gh.CheckRun, pipeline string) (gh.CheckRun, boo
 				continue
 			}
 			if r.ID > 0 {
+				// Prefer the newest GitHub check-run when multiple logical names match.
+				// This avoids stale status from older retries on the same commit.
 				if !useID || r.ID > maxID {
 					selected = r
 					useID = true
@@ -173,6 +177,8 @@ func FindPipelineCheckRunForRun(runs []gh.CheckRun, pipeline, pipelineRun string
 		if LogicalCheckRunName(r.Name) != pipeline {
 			continue
 		}
+		// Match by normalized run name first to avoid cross-run contamination
+		// when GitHub still keeps multiple check-runs for the same pipeline.
 		run := PipelineRunFromCheckRun(r, pipeline)
 		if run != targetRun {
 			continue

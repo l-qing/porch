@@ -16,6 +16,8 @@ func ProbeFromCheckRun(status, conclusion string) ProbeResult {
 		case "success":
 			return ProbeResult{Status: pipestatus.StatusSucceeded, Reason: "gh_fallback", Conclusion: pipestatus.ConclusionSuccess}
 		case "", "neutral", "cancelled", "timed_out", "action_required", "stale", "startup_failure", "failure":
+			// Treat all non-success completed conclusions as failed so auto-retry
+			// behavior stays conservative and explicit.
 			return ProbeResult{Status: pipestatus.StatusFailed, Reason: "gh_fallback", Conclusion: pipestatus.ConclusionFailure}
 		default:
 			return ProbeResult{Status: pipestatus.StatusFailed, Reason: "gh_fallback", Conclusion: pipestatus.ConclusionFailure}

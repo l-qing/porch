@@ -47,6 +47,8 @@ func LoadWithOptions(orchestratorPath string, opts LoadOptions) (RuntimeConfig, 
 	}
 
 	componentsPath := out.Root.ComponentsFile
+	// CLI override always wins over orchestrator.yaml.
+	// The resolved path is stored back into runtime config for observability/logging.
 	if strings.TrimSpace(opts.ComponentsFileOverride) != "" {
 		componentsPath = opts.ComponentsFileOverride
 		out.Root.ComponentsFile = opts.ComponentsFileOverride
@@ -70,6 +72,7 @@ func LoadWithOptions(orchestratorPath string, opts LoadOptions) (RuntimeConfig, 
 	for _, c := range out.Root.Components {
 		branches := normalizeBranches(c.Branches)
 		if len(branches) > 0 {
+			// Highest priority: explicit branches in orchestrator.yaml.
 			merged, err = appendExpandedRuntimeComponents(merged, seenRuntimeName, c, branches)
 			if err != nil {
 				return out, err
@@ -78,6 +81,7 @@ func LoadWithOptions(orchestratorPath string, opts LoadOptions) (RuntimeConfig, 
 		}
 
 		if len(c.Patterns) > 0 {
+			// Pattern-based components are expanded at runtime via GitHub branch listing.
 			if _, ok := seenRuntimeName[c.Name]; ok {
 				return out, fmt.Errorf("duplicated runtime component name %q, check component name/branches", c.Name)
 			}
@@ -93,6 +97,7 @@ func LoadWithOptions(orchestratorPath string, opts LoadOptions) (RuntimeConfig, 
 
 		branches = componentBranchesFromFile(c.Name, revisions)
 		if len(branches) == 0 {
+			// Keep watch/status usable even when some components are absent from revisions.
 			fmt.Fprintf(os.Stderr, "WARN: component %q missing revision in components file and no component.branches/branch_patterns provided, skipping\n", c.Name)
 			continue
 		}
@@ -110,6 +115,7 @@ func appendExpandedRuntimeComponents(merged []LoadedComponent, seenRuntimeName m
 	for _, branch := range branches {
 		name := c.Name
 		if multi {
+			// Runtime names must be unique to keep state keys stable.
 			name = fmt.Sprintf("%s@%s", c.Name, branch)
 		}
 		if _, ok := seenRuntimeName[name]; ok {

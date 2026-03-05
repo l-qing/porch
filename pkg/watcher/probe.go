@@ -102,6 +102,7 @@ func ProbePipelineRun(ctx context.Context, namespace, name, kubeconfig, kubeCont
 		return ProbeResult{}, fmt.Errorf("decode pipelinerun json: %w", err)
 	}
 
+	// Tekton pipeline terminal state is represented in the Succeeded condition.
 	for _, c := range payload.Status.Conditions {
 		if c.Type != "Succeeded" {
 			continue
@@ -132,6 +133,7 @@ func resolveKubeconfigPath(raw string) string {
 		return ""
 	}
 	if strings.HasPrefix(s, "~/") {
+		// Expand user-home shorthand to keep command invocation explicit in logs.
 		if u, err := user.Current(); err == nil && strings.TrimSpace(u.HomeDir) != "" {
 			return filepath.Join(u.HomeDir, strings.TrimPrefix(s, "~/"))
 		}
@@ -148,6 +150,7 @@ func maskKubectlArgs(args []string) []string {
 			continue
 		}
 		if a == "--kubeconfig" {
+			// Keep command traces actionable while avoiding local path leakage.
 			out = append(out, "--kubeconfig", "<path>")
 			if i+1 < len(args) {
 				skip = true

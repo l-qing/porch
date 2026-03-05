@@ -8,6 +8,8 @@ func DeriveStatusFromProbe(probeErr error, result ProbeResult, consecutiveQueryE
 	}
 
 	if probeErr != nil {
+		// Transient probe failures keep pipeline in WATCHING until threshold
+		// is reached; this avoids false failures during short API outages.
 		nextErrors = consecutiveQueryErrors + 1
 		if nextErrors >= threshold {
 			return pipestatus.StatusQueryErr, nextErrors

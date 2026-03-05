@@ -16,6 +16,8 @@ func New(components []config.LoadedComponent, dependencies map[string]config.Dep
 		nodes[c.Name] = struct{}{}
 	}
 
+	// Build a fully materialized dependency map for all runtime components.
+	// Missing dependency spec means "no dependency", not "unknown component".
 	deps := map[string][]string{}
 	for _, c := range components {
 		deps[c.Name] = nil
@@ -57,6 +59,8 @@ func detectCycle(deps map[string][]string) error {
 	state := map[string]int{}
 	var dfs func(string) error
 	dfs = func(n string) error {
+		// Three-color DFS:
+		// visiting -> currently on stack, done -> fully explored.
 		if state[n] == visiting {
 			return fmt.Errorf("dependency cycle detected at %q", n)
 		}

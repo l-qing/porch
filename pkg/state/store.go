@@ -21,6 +21,8 @@ func NewStore(path string) *Store {
 func (s *Store) Load() (File, error) {
 	var st File
 
+	// Use a file lock for read path as well so readers never observe
+	// partially written files during concurrent save.
 	lock, err := s.lock()
 	if err != nil {
 		return st, err
@@ -64,6 +66,7 @@ func (s *Store) Save(st File) error {
 		return fmt.Errorf("create state dir: %w", err)
 	}
 
+	// Write-then-rename keeps state updates atomic on local filesystems.
 	tmp, err := os.CreateTemp(dir, ".porch-state-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
@@ -97,6 +100,7 @@ func (s *Store) lock() (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open lock file: %w", err)
 	}
+	// Flock gives process-level mutual exclusion across concurrent porch runs.
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("lock state file: %w", err)

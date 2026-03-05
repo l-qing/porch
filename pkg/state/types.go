@@ -7,11 +7,13 @@ import (
 )
 
 type File struct {
-	Version     int                  `json:"version"`
-	StartedAt   time.Time            `json:"started_at"`
-	UpdatedAt   time.Time            `json:"updated_at"`
-	Components  map[string]Component `json:"components"`
-	FinalAction FinalActionState     `json:"final_action"`
+	Version    int                  `json:"version"`
+	StartedAt  time.Time            `json:"started_at"`
+	UpdatedAt  time.Time            `json:"updated_at"`
+	Components map[string]Component `json:"components"`
+	// FinalAction is tracked separately so restart logic can decide
+	// whether final trigger has already been sent.
+	FinalAction FinalActionState `json:"final_action"`
 }
 
 type FinalActionState struct {
@@ -30,8 +32,9 @@ type PipelineState struct {
 	Status      pipestatus.Status `json:"status"`
 	PipelineRun string            `json:"pipelinerun_name"`
 	RetryCount  int               `json:"retry_count"`
-	LastRetryAt *time.Time        `json:"last_retry_at"`
-	CompletedAt *time.Time        `json:"completed_at"`
-	RetryAfter  *time.Time        `json:"retry_after,omitempty"`
-	SettleAfter *time.Time        `json:"settle_after,omitempty"`
+	// LastRetryAt is retained for backward compatibility with older state files.
+	LastRetryAt *time.Time `json:"last_retry_at"`
+	CompletedAt *time.Time `json:"completed_at"`
+	RetryAfter  *time.Time `json:"retry_after,omitempty"`
+	SettleAfter *time.Time `json:"settle_after,omitempty"`
 }

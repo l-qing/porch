@@ -805,21 +805,52 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 				continue
 			}
 
-			if useKubectlProbe(mode) && (p.Namespace == "" || p.PipelineRun == "") {
-				p.Status = pipestatus.StatusWatching
-				p.Conclusion = pipestatus.ConclusionUnknown
-				continue
-			}
-
 			var (
 				res      watcher.ProbeResult
 				probeErr error
 			)
 			if useKubectlProbe(mode) {
-				probeCtx, cancel := context.WithTimeout(ctx, probePipelineTimeout)
-				res, probeErr = watcher.ProbePipelineRun(probeCtx, p.Namespace, p.PipelineRun, cfg.Root.Connection.Kubeconfig, cfg.Root.Connection.Context)
-				cancel()
-				if probeErr != nil {
+				// Some check-runs do not expose a parseable PipelineRun in details_url.
+				// In that case we cannot probe via kubectl and should fall back to GH
+				// instead of keeping the pipeline in RUN forever.
+				if strings.TrimSpace(p.Namespace) == "" || strings.TrimSpace(p.PipelineRun) == "" {
+					fallback, source, err := fallbackProbeFromGH(ctx, ghc, c, p.Name, p.PipelineRun)
+					if err == nil {
+						res = fallback
+						probeErr = nil
+						checksURL := commitChecksURL(cfg.Root.Connection.GitHubOrg, c.Repo, c.SHA)
+						msg := "pipeline run missing, fallback to GH check-run"
+						if checksURL != "" {
+							msg = fmt.Sprintf("%s: %s", msg, checksURL)
+						}
+						emit(eventGHFallback, msg, logrus.Fields{
+							"component": c.Name,
+							"branch":    c.Branch,
+							"pipeline":  p.Name,
+							"run":       p.PipelineRun,
+							"sha":       c.SHA,
+							"reason":    source,
+							"checks":    checksURL,
+						})
+					} else {
+						probeErr = err
+						log.WithFields(logrus.Fields{
+							"component": c.Name,
+							"pipeline":  p.Name,
+							"run":       p.PipelineRun,
+							"namespace": p.Namespace,
+							"sha":       c.SHA,
+							"error":     err.Error(),
+						}).Debug("github fallback failed when runtime run is missing")
+					}
+				} else {
+					probeCtx, cancel := context.WithTimeout(ctx, probePipelineTimeout)
+					res, probeErr = watcher.ProbePipelineRun(probeCtx, p.Namespace, p.PipelineRun, cfg.Root.Connection.Kubeconfig, cfg.Root.Connection.Context)
+					cancel()
+				}
+				// Only retry GH fallback here for real kubectl probe failures.
+				// Missing run/namespace has already been handled in the block above.
+				if probeErr != nil && strings.TrimSpace(p.Namespace) != "" && strings.TrimSpace(p.PipelineRun) != "" {
 					log.WithFields(logrus.Fields{
 						"component": c.Name,
 						"pipeline":  p.Name,

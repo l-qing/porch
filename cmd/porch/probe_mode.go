@@ -18,6 +18,8 @@ const (
 func resolveProbeMode(raw string, cfg config.RuntimeConfig) (probeMode, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "", string(probeModeAuto):
+		// Auto mode picks kubectl-first only when kube access is configured.
+		// Otherwise default to gh-only so CLI still works in local/non-cluster setups.
 		if hasKubectlConfig(cfg.Root.Connection.Kubeconfig, cfg.Root.Connection.Context) {
 			return probeModeKubectlFirst, nil
 		}
