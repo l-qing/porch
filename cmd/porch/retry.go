@@ -79,7 +79,14 @@ func runRetry(opts retryOptions) error {
 		}
 	}
 
-	target, err := resolveRetryTarget(cfg.Components, strings.TrimSpace(opts.componentName), strings.TrimSpace(opts.branch), strings.TrimSpace(opts.pipelineName))
+	componentName := strings.TrimSpace(opts.componentName)
+	pipelineName := strings.TrimSpace(opts.pipelineName)
+	target := &config.LoadedComponent{}
+	if len(prNumbers) > 0 {
+		target, err = resolveRetryTargetForPR(cfg.Components, componentName, pipelineName)
+	} else {
+		target, err = resolveRetryTarget(cfg.Components, componentName, strings.TrimSpace(opts.branch), pipelineName)
+	}
 	if err != nil {
 		return err
 	}
@@ -99,6 +106,7 @@ func runRetry(opts retryOptions) error {
 
 	type retryRef struct {
 		branch string
+		sha    string
 		pr     int
 	}
 	refs := make([]retryRef, 0, 1)
@@ -113,8 +121,13 @@ func runRetry(opts retryOptions) error {
 			if strings.TrimSpace(info.State) != "open" {
 				return fmt.Errorf("pull request %s/%s#%d is not open (state=%s)", cfg.Root.Connection.GitHubOrg, target.Repo, pr, info.State)
 			}
+			headSHA := strings.TrimSpace(info.Head.SHA)
+			if headSHA == "" {
+				return fmt.Errorf("pull request %s/%s#%d has empty head sha", cfg.Root.Connection.GitHubOrg, target.Repo, pr)
+			}
 			refs = append(refs, retryRef{
 				branch: strings.TrimSpace(info.Head.Ref),
+				sha:    headSHA,
 				pr:     info.Number,
 			})
 		}
@@ -124,9 +137,13 @@ func runRetry(opts retryOptions) error {
 	triggered := 0
 	skippedSucceeded := 0
 	for _, ref := range refs {
-		sha, err := ghc.BranchSHA(ctx, target.Repo, ref.branch)
-		if err != nil {
-			return err
+		sha := strings.TrimSpace(ref.sha)
+		if sha == "" {
+			refSHA, err := ghc.BranchSHA(ctx, target.Repo, ref.branch)
+			if err != nil {
+				return err
+			}
+			sha = refSHA
 		}
 		checkRuns, err := ghc.CheckRuns(ctx, target.Repo, sha)
 		if err != nil {
@@ -141,7 +158,7 @@ func runRetry(opts retryOptions) error {
 		}
 
 		for _, p := range target.Pipelines {
-			if opts.pipelineName != "" && p.Name != opts.pipelineName {
+			if pipelineName != "" && p.Name != pipelineName {
 				continue
 			}
 			matchedTotal++
@@ -187,8 +204,8 @@ func runRetry(opts retryOptions) error {
 		}
 	}
 
-	if opts.pipelineName != "" && matchedTotal == 0 && !opts.dryRun {
-		return fmt.Errorf("pipeline %q not found under component %q", opts.pipelineName, target.Name)
+	if pipelineName != "" && matchedTotal == 0 && !opts.dryRun {
+		return fmt.Errorf("pipeline %q not found under component %q", pipelineName, target.Name)
 	}
 
 	if opts.dryRun {
@@ -197,6 +214,42 @@ func runRetry(opts retryOptions) error {
 		fmt.Printf("triggered %d retry command(s), skipped %d succeeded pipeline(s)\n", triggered, skippedSucceeded)
 	}
 	return nil
+}
+
+func resolveRetryTargetForPR(components []config.LoadedComponent, componentName, pipelineName string) (*config.LoadedComponent, error) {
+	selected := matchComponentsBySelector(components, componentName)
+	if len(selected) == 0 {
+		if pipelineName == "" {
+			return nil, fmt.Errorf("component %q not found", componentName)
+		}
+		copy := buildAdHocComponent(componentName, pipelineName, "")
+		return &copy, nil
+	}
+	repo := strings.TrimSpace(selected[0].Repo)
+	if repo == "" {
+		return nil, fmt.Errorf("component %q repo is empty", componentName)
+	}
+	for _, c := range selected[1:] {
+		if strings.TrimSpace(c.Repo) != repo {
+			return nil, fmt.Errorf("component %q maps to multiple repos in config", componentName)
+		}
+	}
+	base := selected[0]
+	if pipelineName != "" {
+		filtered := make([]config.PipelineSpec, 0, 1)
+		for _, p := range base.Pipelines {
+			if p.Name == pipelineName {
+				filtered = append(filtered, p)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil, fmt.Errorf("pipeline %q not found under component %q", pipelineName, componentName)
+		}
+		base.Pipelines = filtered
+	}
+	base.Name = componentName
+	base.Branch = ""
+	return &base, nil
 }
 
 func resolveRetryTarget(components []config.LoadedComponent, componentName, branch, pipelineName string) (*config.LoadedComponent, error) {

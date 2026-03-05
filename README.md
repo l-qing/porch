@@ -123,6 +123,7 @@ Ad-hoc repo mode:
 PR mode:
 
 - `--prs` expands runtime targets by PR numbers directly and uses each PR `head.ref` as runtime branch.
+- PR mode resolves pipeline status by each PR `head.sha` instead of branch commit lookup.
 - Retry comments are sent to PR comments (`issues/{number}/comments`) instead of commit comments.
 - `--prs` and `--branch` / `--branch-pattern` are mutually exclusive.
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -114,7 +115,7 @@ func (c *Client) run(ctx context.Context, args ...string) ([]byte, []byte, error
 }
 
 func (c *Client) BranchSHA(ctx context.Context, repo, branch string) (string, error) {
-	path := fmt.Sprintf("repos/%s/%s/commits/%s", c.org, repo, branch)
+	path := fmt.Sprintf("repos/%s/%s/commits/%s", c.org, repo, url.PathEscape(strings.TrimSpace(branch)))
 	out, errOut, err := c.run(ctx, "api", path)
 	if err != nil {
 		return "", commandError([]string{"gh", "api", path}, errOut, err)

@@ -36,9 +36,26 @@ var runName = regexp.MustCompile(`/detail/([^/?#]+)$`)
 func Initialize(ctx context.Context, cfg config.RuntimeConfig, ghc *gh.Client) ([]RuntimeComponent, error) {
 	out := make([]RuntimeComponent, 0, len(cfg.Components))
 	for _, c := range cfg.Components {
-		sha, err := ghc.BranchSHA(ctx, c.Repo, c.Branch)
-		if err != nil {
-			return nil, fmt.Errorf("component %s branch sha: %w", c.Name, err)
+		branch := strings.TrimSpace(c.Branch)
+		sha := ""
+		if c.PRNumber > 0 {
+			// PR mode tracks status by pull request head SHA to avoid branch-ref drift.
+			pr, err := ghc.PullRequest(ctx, c.Repo, c.PRNumber)
+			if err != nil {
+				return nil, fmt.Errorf("component %s pull request %d: %w", c.Name, c.PRNumber, err)
+			}
+			if strings.TrimSpace(pr.State) != "open" {
+				return nil, fmt.Errorf("component %s pull request %d is not open (state=%s)", c.Name, c.PRNumber, pr.State)
+			}
+			branch = strings.TrimSpace(pr.Head.Ref)
+			sha = strings.TrimSpace(pr.Head.SHA)
+		}
+		if sha == "" {
+			refSHA, err := ghc.BranchSHA(ctx, c.Repo, branch)
+			if err != nil {
+				return nil, fmt.Errorf("component %s branch sha: %w", c.Name, err)
+			}
+			sha = refSHA
 		}
 
 		checkRuns, err := ghc.CheckRuns(ctx, c.Repo, sha)
@@ -46,7 +63,7 @@ func Initialize(ctx context.Context, cfg config.RuntimeConfig, ghc *gh.Client) (
 			return nil, fmt.Errorf("component %s check-runs: %w", c.Name, err)
 		}
 
-		runtime := RuntimeComponent{Name: c.Name, Repo: c.Repo, Branch: c.Branch, SHA: sha}
+		runtime := RuntimeComponent{Name: c.Name, Repo: c.Repo, Branch: branch, SHA: sha}
 		for _, p := range c.Pipelines {
 			pr := PipelineRuntime{Name: p.Name, Status: pipestatus.StatusMissing.String(), Conclusion: "-"}
 			if cr, ok := FindPipelineCheckRun(checkRuns, p.Name); ok {

@@ -2,6 +2,7 @@ package component
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"porch/pkg/config"
@@ -203,5 +204,45 @@ func TestInitializeSelectsParentCheckRun(t *testing.T) {
 	}
 	if p.Conclusion != "failure" {
 		t.Fatalf("expected parent conclusion failure, got %q", p.Conclusion)
+	}
+}
+
+func TestInitializeUsesPullRequestHeadForPRMode(t *testing.T) {
+	runner := fakeRunner{fn: func(args ...string) ([]byte, []byte, error) {
+		joined := strings.Join(args, " ")
+		switch joined {
+		case "api repos/TestGroup/catalog/pulls/101":
+			return []byte(`{"number":101,"state":"open","head":{"ref":"feat/add-golang-task","sha":"abc123"}}`), nil, nil
+		case "api repos/TestGroup/catalog/commits/abc123/check-runs":
+			return []byte(`{"check_runs":[{"name":"Pipelines as Code CI / catalog-all-in-one","status":"in_progress","conclusion":"","details_url":"https://x/workspace/devops~business-build~devops/pipeline/pipelineRuns/detail/catalog-all-in-one-a1b2c"}]}`), nil, nil
+		default:
+			return nil, []byte("unexpected args"), context.Canceled
+		}
+	}}
+
+	ghc := gh.NewClient("TestGroup", runner)
+	rc := config.RuntimeConfig{
+		Components: []config.LoadedComponent{{
+			Name:     "catalog#101",
+			Repo:     "catalog",
+			PRNumber: 101,
+			Pipelines: []config.PipelineSpec{{
+				Name: "catalog-all-in-one",
+			}},
+		}},
+	}
+
+	components, err := Initialize(context.Background(), rc, ghc)
+	if err != nil {
+		t.Fatalf("Initialize error: %v", err)
+	}
+	if len(components) != 1 {
+		t.Fatalf("components len=%d, want 1", len(components))
+	}
+	if components[0].Branch != "feat/add-golang-task" {
+		t.Fatalf("branch=%q, want feat/add-golang-task", components[0].Branch)
+	}
+	if components[0].SHA != "abc123" {
+		t.Fatalf("sha=%q, want abc123", components[0].SHA)
 	}
 }

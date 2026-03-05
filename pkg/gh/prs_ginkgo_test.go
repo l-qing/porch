@@ -10,6 +10,40 @@ import (
 )
 
 var _ = Describe("Pull request APIs", func() {
+	type branchCase struct {
+		description   string
+		branch        string
+		expectCmd     string
+		wantErrSubstr string
+	}
+
+	DescribeTable("BranchSHA escapes branch refs in api path",
+		func(tc branchCase) {
+			client := NewClient("TestGroup", fakeRunner{fn: func(args ...string) ([]byte, []byte, error) {
+				Expect(strings.Join(args, " ")).To(Equal(tc.expectCmd))
+				return []byte(`{"sha":"abc123"}`), nil, nil
+			}})
+			sha, err := client.BranchSHA(context.Background(), "repo", tc.branch)
+			if tc.wantErrSubstr != "" {
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring(tc.wantErrSubstr))
+				return
+			}
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sha).To(Equal("abc123"))
+		},
+		Entry("keeps plain branch unchanged", branchCase{
+			description: "main branch",
+			branch:      "main",
+			expectCmd:   "api repos/TestGroup/repo/commits/main",
+		}),
+		Entry("escapes slash in branch ref", branchCase{
+			description: "feature branch",
+			branch:      "feat/add-golang-task",
+			expectCmd:   "api repos/TestGroup/repo/commits/feat%2Fadd-golang-task",
+		}),
+	)
+
 	type pullRequestCase struct {
 		description   string
 		response      string

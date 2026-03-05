@@ -39,8 +39,11 @@ var _ = Describe("watchOnce retry comment target", func() {
 					return nil, []byte("unexpected"), errors.New("unexpected")
 				}
 				callIndex++
-				if strings.HasPrefix(joined, "api repos/TestGroup/catalog/commits/feat/a") {
+				if strings.HasPrefix(joined, "api repos/TestGroup/catalog/commits/feat%2Fa") {
 					return []byte(`{"sha":"abc123"}`), nil, nil
+				}
+				if joined == "api repos/TestGroup/catalog/pulls/101" {
+					return []byte(`{"number":101,"state":"open","head":{"ref":"feat/a","sha":"abc123"}}`), nil, nil
 				}
 				return nil, nil, nil
 			}})
@@ -94,7 +97,7 @@ var _ = Describe("watchOnce retry comment target", func() {
 			description: "default mode",
 			prNumber:    0,
 			expectCalls: []string{
-				"api repos/TestGroup/catalog/commits/feat/a",
+				"api repos/TestGroup/catalog/commits/feat%2Fa",
 				"api repos/TestGroup/catalog/commits/abc123/comments -f body=/test catalog-all-in-one branch:feat/a",
 			},
 		}),
@@ -102,7 +105,7 @@ var _ = Describe("watchOnce retry comment target", func() {
 			description: "pr mode",
 			prNumber:    101,
 			expectCalls: []string{
-				"api repos/TestGroup/catalog/commits/feat/a",
+				"api repos/TestGroup/catalog/pulls/101",
 				"api repos/TestGroup/catalog/issues/101/comments -f body=/test catalog-all-in-one branch:feat/a",
 			},
 		}),

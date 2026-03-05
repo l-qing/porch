@@ -156,4 +156,56 @@ var _ = Describe("PR mode helpers", func() {
 			wantErrSubstr: "component \"unknown\" not found",
 		}),
 	)
+
+	type retryTargetCase struct {
+		description   string
+		components    []config.LoadedComponent
+		component     string
+		pipeline      string
+		wantRepo      string
+		wantPipelines []string
+		wantErrSubstr string
+	}
+
+	DescribeTable("resolveRetryTargetForPR",
+		func(tc retryTargetCase) {
+			target, err := resolveRetryTargetForPR(tc.components, tc.component, tc.pipeline)
+			if tc.wantErrSubstr != "" {
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring(tc.wantErrSubstr))
+				return
+			}
+			Expect(err).NotTo(HaveOccurred())
+			Expect(target.Repo).To(Equal(tc.wantRepo))
+			got := make([]string, 0, len(target.Pipelines))
+			for _, p := range target.Pipelines {
+				got = append(got, p.Name)
+			}
+			Expect(got).To(Equal(tc.wantPipelines))
+		},
+		Entry("collapses multi-branch component to one retry target", retryTargetCase{
+			description: "configured multi branch",
+			components: []config.LoadedComponent{
+				{Name: "catalog@main", Repo: "catalog", Branch: "main", Pipelines: []config.PipelineSpec{{Name: "catalog-all-in-one"}}},
+				{Name: "catalog@release-1.0", Repo: "catalog", Branch: "release-1.0", Pipelines: []config.PipelineSpec{{Name: "catalog-all-in-one"}}},
+			},
+			component:     "catalog",
+			wantRepo:      "catalog",
+			wantPipelines: []string{"catalog-all-in-one"},
+		}),
+		Entry("supports ad-hoc retry target when component is missing", retryTargetCase{
+			description:   "ad-hoc with pipeline",
+			components:    []config.LoadedComponent{},
+			component:     "catalog",
+			pipeline:      "catalog-all-in-one",
+			wantRepo:      "catalog",
+			wantPipelines: []string{"catalog-all-in-one"},
+		}),
+		Entry("errors when component is missing without pipeline", retryTargetCase{
+			description:   "missing component",
+			components:    []config.LoadedComponent{},
+			component:     "catalog",
+			wantErrSubstr: "component \"catalog\" not found",
+		}),
+	)
 })

@@ -856,12 +856,12 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 			// Backoff state: waiting for the timer to fire before triggering retry.
 			if p.Status == pipestatus.StatusBackoff {
 				if p.RetryAfter != nil && !time.Now().Before(*p.RetryAfter) {
-					sha, err := ghc.BranchSHA(ctx, c.Repo, c.Branch)
+					sha, err := refreshRuntimeSHA(ctx, ghc, c)
 					if err != nil {
 						if isStopping() {
 							return errWatchStopRequested
 						}
-						return fmt.Errorf("refresh branch sha for %s: %w", c.Name, err)
+						return fmt.Errorf("refresh runtime sha for %s: %w", c.Name, err)
 					}
 					c.SHA = sha
 					body := strings.ReplaceAll(p.RetryCmd, "{branch}", c.Branch)
@@ -1046,7 +1046,7 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 				if p.Status != pipestatus.StatusSucceeded {
 					now := time.Now().UTC()
 					p.CompletedAt = &now
-					if sha, err := ghc.BranchSHA(ctx, c.Repo, c.Branch); err == nil {
+					if sha, err := refreshRuntimeSHA(ctx, ghc, c); err == nil {
 						c.SHA = sha
 					}
 					emit(eventSuccess, fmt.Sprintf("%s/%s", c.Name, p.Name), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA})
@@ -1488,19 +1488,43 @@ func fallbackProbeFromGH(ctx context.Context, ghc *gh.Client, c *trackedComponen
 		return watcher.ProbeResult{}, "", fmt.Errorf("pipeline %q run %q not found on current sha", pipeline, currentRun)
 	}
 
-	sha, err := ghc.BranchSHA(ctx, c.Repo, c.Branch)
+	sha, err := refreshRuntimeSHA(ctx, ghc, c)
 	if err != nil {
 		return watcher.ProbeResult{}, "", err
 	}
-	if sha != c.SHA {
-		c.SHA = sha
-	}
+	c.SHA = sha
 
 	res, err := lookup(c.SHA)
 	if err != nil {
 		return watcher.ProbeResult{}, "", err
 	}
 	return res, "gh_refreshed_sha", nil
+}
+
+func refreshRuntimeSHA(ctx context.Context, ghc *gh.Client, c *trackedComponent) (string, error) {
+	if c.PRNumber > 0 {
+		// PR mode should always follow the pull request head commit, not branch refs.
+		pr, err := ghc.PullRequest(ctx, c.Repo, c.PRNumber)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(pr.State) != "open" {
+			return "", fmt.Errorf("pull request %s#%d is not open (state=%s)", c.Repo, c.PRNumber, pr.State)
+		}
+		c.Branch = strings.TrimSpace(pr.Head.Ref)
+		sha := strings.TrimSpace(pr.Head.SHA)
+		if sha == "" {
+			return "", fmt.Errorf("empty pull request head sha for %s#%d", c.Repo, c.PRNumber)
+		}
+		c.SHA = sha
+		return sha, nil
+	}
+	sha, err := ghc.BranchSHA(ctx, c.Repo, c.Branch)
+	if err != nil {
+		return "", err
+	}
+	c.SHA = sha
+	return sha, nil
 }
 
 func buildProgressMarkdown(rows []tui.Row, startedAt, reportedAt time.Time, page, total int) string {
