@@ -1607,12 +1607,16 @@ func shouldRefreshPRStatusFromGH(c *trackedComponent, mode probeMode, probeErr e
 }
 
 func shouldOverrideProbeResultWithPRStatus(current, gh watcher.ProbeResult) bool {
-	switch gh.Status {
-	case pipestatus.StatusFailed, pipestatus.StatusSucceeded:
-		// Terminal GH states should override kubectl in PR mode, including stale RUN.
-		if current.Status != gh.Status || current.Conclusion != gh.Conclusion || current.Reason != gh.Reason {
-			return true
-		}
+	if gh.Status == pipestatus.StatusFailed {
+		// GH failure should override kubectl non-terminal states to avoid hanging on stale RUN.
+		return current.Status != pipestatus.StatusFailed || current.Conclusion != pipestatus.ConclusionFailure
+	}
+
+	if gh.Status == pipestatus.StatusSucceeded {
+		// GH success can be stale (for example older run or child task success).
+		// Keep kubectl running/watching as authoritative and only trust GH success
+		// when kubectl payload is unknown.
+		return current.Status == pipestatus.StatusUnknown
 	}
 
 	// Unknown kubectl payloads are less informative than GH running/watching states.

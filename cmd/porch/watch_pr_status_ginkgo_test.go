@@ -136,5 +136,15 @@ var _ = Describe("watchOnce PR status preference", func() {
 			expectedRetryEvent:  0,
 			expectedGHFallback:  0,
 		}),
+		Entry("should keep running when GH reports success but kubectl still running", testCase{
+			description:         "guard against stale GH success overriding active kubectl run",
+			kubectlPayload:      `{"status":{"conditions":[{"type":"Succeeded","status":"Unknown","reason":"Running"}]}}`,
+			checkRunsPayload:    `{"check_runs":[{"id":222,"name":"Pipelines as Code CI / catalog-all-in-one","status":"completed","conclusion":"success","details_url":"https://x/workspace/devops~business-build~devops/pipeline/pipelineRuns/detail/catalog-all-in-one-wzmt7-build-msmtp-image"}]}`,
+			expectedGHCalls:     1,
+			expectedStatus:      pipestatus.StatusRunning,
+			expectedFailedEvent: 0,
+			expectedRetryEvent:  0,
+			expectedGHFallback:  0,
+		}),
 	)
 })
