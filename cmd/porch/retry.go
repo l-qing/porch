@@ -72,86 +72,61 @@ func runRetry(opts retryOptions) error {
 	if len(prNumbers) > 0 && strings.TrimSpace(opts.branch) != "" {
 		return fmt.Errorf("--prs and --branch are mutually exclusive")
 	}
-	if len(prNumbers) == 0 {
-		cfg, err = resolvePatternComponents(ctx, cfg, ghc)
-		if err != nil {
-			return err
-		}
-	}
-
 	componentName := strings.TrimSpace(opts.componentName)
 	pipelineName := strings.TrimSpace(opts.pipelineName)
-	target := &config.LoadedComponent{}
 	if len(prNumbers) > 0 {
-		target, err = resolveRetryTargetForPR(cfg.Components, componentName, pipelineName)
-	} else {
-		target, err = resolveRetryTarget(cfg.Components, componentName, strings.TrimSpace(opts.branch), pipelineName)
+		return runRetryPRMode(ctx, cfg, ghc, opts, componentName, pipelineName, prNumbers, log)
 	}
+	return runRetryBranchMode(ctx, cfg, ghc, opts, componentName, pipelineName, log)
+}
+
+func runRetryPRMode(
+	ctx context.Context,
+	cfg config.RuntimeConfig,
+	ghc *gh.Client,
+	opts retryOptions,
+	componentName, pipelineName string,
+	prNumbers []int,
+	log *logrus.Logger,
+) error {
+	target, err := resolveRetryTargetForPR(cfg.Components, componentName, pipelineName)
 	if err != nil {
 		return err
-	}
-	branch := target.Branch
-	if strings.TrimSpace(opts.branch) != "" {
-		branch = strings.TrimSpace(opts.branch)
 	}
 	log.WithFields(logrus.Fields{
 		"component": opts.componentName,
 		"pipeline":  normalize(opts.pipelineName),
-		"branch":    branch,
+		"branch":    "-",
 		"prs":       normalize(strings.TrimSpace(opts.prs)),
 		"force":     fmt.Sprintf("%t", opts.force),
 		"dry_run":   fmt.Sprintf("%t", opts.dryRun),
 		"config":    opts.configPath,
 	}).Info("retry command initialized")
 
-	type retryRef struct {
-		branch string
-		sha    string
-		pr     int
-	}
-	refs := make([]retryRef, 0, 1)
-	if len(prNumbers) == 0 {
-		refs = append(refs, retryRef{branch: branch})
-	} else {
-		for _, pr := range prNumbers {
-			info, err := ghc.PullRequest(ctx, target.Repo, pr)
-			if err != nil {
-				return err
-			}
-			if strings.TrimSpace(info.State) != "open" {
-				return fmt.Errorf("pull request %s/%s#%d is not open (state=%s)", cfg.Root.Connection.GitHubOrg, target.Repo, pr, info.State)
-			}
-			headSHA := strings.TrimSpace(info.Head.SHA)
-			if headSHA == "" {
-				return fmt.Errorf("pull request %s/%s#%d has empty head sha", cfg.Root.Connection.GitHubOrg, target.Repo, pr)
-			}
-			refs = append(refs, retryRef{
-				branch: strings.TrimSpace(info.Head.Ref),
-				sha:    headSHA,
-				pr:     info.Number,
-			})
-		}
-	}
-
 	matchedTotal := 0
 	triggered := 0
 	skippedSucceeded := 0
-	for _, ref := range refs {
-		sha := strings.TrimSpace(ref.sha)
-		if sha == "" {
-			refSHA, err := ghc.BranchSHA(ctx, target.Repo, ref.branch)
-			if err != nil {
-				return err
-			}
-			sha = refSHA
+	for _, pr := range prNumbers {
+		info, err := ghc.PullRequest(ctx, target.Repo, pr)
+		if err != nil {
+			return err
 		}
+		if strings.TrimSpace(info.State) != "open" {
+			return fmt.Errorf("pull request %s/%s#%d is not open (state=%s)", cfg.Root.Connection.GitHubOrg, target.Repo, pr, info.State)
+		}
+		branch := strings.TrimSpace(info.Head.Ref)
+		sha := strings.TrimSpace(info.Head.SHA)
+		if sha == "" {
+			return fmt.Errorf("pull request %s/%s#%d has empty head sha", cfg.Root.Connection.GitHubOrg, target.Repo, pr)
+		}
+
 		checkRuns, err := ghc.CheckRuns(ctx, target.Repo, sha)
 		if err != nil {
 			// Manual retry should remain available even when status lookup is degraded.
 			logEvent(log, "RETRY_WARN", fmt.Sprintf("check-runs query failed, fallback to direct retry trigger: %v", err), logrus.Fields{
 				"component": target.Name,
-				"branch":    ref.branch,
-				"pr":        fmt.Sprintf("%d", ref.pr),
+				"branch":    branch,
+				"pr":        fmt.Sprintf("%d", info.Number),
 				"sha":       sha[:8],
 			})
 			checkRuns = nil
@@ -170,19 +145,19 @@ func runRetry(opts retryOptions) error {
 				logEvent(log, "MANUAL_SKIP", "pipeline already succeeded on current commit, skip retry", logrus.Fields{
 					"component": target.Name,
 					"pipeline":  p.Name,
-					"branch":    ref.branch,
-					"pr":        fmt.Sprintf("%d", ref.pr),
+					"branch":    branch,
+					"pr":        fmt.Sprintf("%d", info.Number),
 					"sha":       sha[:8],
 				})
 				continue
 			}
 
-			body := strings.ReplaceAll(p.RetryCommand, "{branch}", ref.branch)
+			body := strings.ReplaceAll(p.RetryCommand, "{branch}", branch)
 			logEvent(log, "MANUAL_RETRY", "trigger retry comment", logrus.Fields{
 				"component": target.Name,
 				"pipeline":  p.Name,
-				"branch":    ref.branch,
-				"pr":        fmt.Sprintf("%d", ref.pr),
+				"branch":    branch,
+				"pr":        fmt.Sprintf("%d", info.Number),
 				"sha":       sha[:8],
 				"command":   body,
 				"dry_run":   fmt.Sprintf("%t", opts.dryRun),
@@ -191,14 +166,8 @@ func runRetry(opts retryOptions) error {
 			if opts.dryRun {
 				continue
 			}
-			if ref.pr > 0 {
-				if err := ghc.CreatePullRequestComment(ctx, target.Repo, ref.pr, body); err != nil {
-					return err
-				}
-			} else {
-				if err := ghc.CreateCommitComment(ctx, target.Repo, sha, body); err != nil {
-					return err
-				}
+			if err := ghc.CreatePullRequestComment(ctx, target.Repo, info.Number, body); err != nil {
+				return err
 			}
 			triggered++
 		}
@@ -208,6 +177,104 @@ func runRetry(opts retryOptions) error {
 		return fmt.Errorf("pipeline %q not found under component %q", pipelineName, target.Name)
 	}
 
+	if opts.dryRun {
+		fmt.Printf("dry-run finished, to-trigger=%d, skipped_succeeded=%d\n", matchedTotal-skippedSucceeded, skippedSucceeded)
+	} else {
+		fmt.Printf("triggered %d retry command(s), skipped %d succeeded pipeline(s)\n", triggered, skippedSucceeded)
+	}
+	return nil
+}
+
+func runRetryBranchMode(
+	ctx context.Context,
+	cfg config.RuntimeConfig,
+	ghc *gh.Client,
+	opts retryOptions,
+	componentName, pipelineName string,
+	log *logrus.Logger,
+) error {
+	cfg, err := resolvePatternComponents(ctx, cfg, ghc)
+	if err != nil {
+		return err
+	}
+	target, err := resolveRetryTarget(cfg.Components, componentName, strings.TrimSpace(opts.branch), pipelineName)
+	if err != nil {
+		return err
+	}
+	branch := target.Branch
+	if strings.TrimSpace(opts.branch) != "" {
+		branch = strings.TrimSpace(opts.branch)
+	}
+
+	log.WithFields(logrus.Fields{
+		"component": opts.componentName,
+		"pipeline":  normalize(opts.pipelineName),
+		"branch":    branch,
+		"prs":       "-",
+		"force":     fmt.Sprintf("%t", opts.force),
+		"dry_run":   fmt.Sprintf("%t", opts.dryRun),
+		"config":    opts.configPath,
+	}).Info("retry command initialized")
+
+	sha, err := ghc.BranchSHA(ctx, target.Repo, branch)
+	if err != nil {
+		return err
+	}
+	checkRuns, err := ghc.CheckRuns(ctx, target.Repo, sha)
+	if err != nil {
+		// Manual retry should remain available even when status lookup is degraded.
+		logEvent(log, "RETRY_WARN", fmt.Sprintf("check-runs query failed, fallback to direct retry trigger: %v", err), logrus.Fields{
+			"component": target.Name,
+			"branch":    branch,
+			"sha":       sha[:8],
+		})
+		checkRuns = nil
+	}
+
+	matchedTotal := 0
+	triggered := 0
+	skippedSucceeded := 0
+	for _, p := range target.Pipelines {
+		if pipelineName != "" && p.Name != pipelineName {
+			continue
+		}
+		matchedTotal++
+
+		if !opts.force && shouldSkipRetryBySuccess(checkRuns, p.Name) {
+			skippedSucceeded++
+			// Default behavior is conservative: do not retrigger already-successful
+			// pipeline unless user explicitly opts in with --force.
+			logEvent(log, "MANUAL_SKIP", "pipeline already succeeded on current commit, skip retry", logrus.Fields{
+				"component": target.Name,
+				"pipeline":  p.Name,
+				"branch":    branch,
+				"sha":       sha[:8],
+			})
+			continue
+		}
+
+		body := strings.ReplaceAll(p.RetryCommand, "{branch}", branch)
+		logEvent(log, "MANUAL_RETRY", "trigger retry comment", logrus.Fields{
+			"component": target.Name,
+			"pipeline":  p.Name,
+			"branch":    branch,
+			"sha":       sha[:8],
+			"command":   body,
+			"dry_run":   fmt.Sprintf("%t", opts.dryRun),
+		})
+
+		if opts.dryRun {
+			continue
+		}
+		if err := ghc.CreateCommitComment(ctx, target.Repo, sha, body); err != nil {
+			return err
+		}
+		triggered++
+	}
+
+	if pipelineName != "" && matchedTotal == 0 && !opts.dryRun {
+		return fmt.Errorf("pipeline %q not found under component %q", pipelineName, target.Name)
+	}
 	if opts.dryRun {
 		fmt.Printf("dry-run finished, to-trigger=%d, skipped_succeeded=%d\n", matchedTotal-skippedSucceeded, skippedSucceeded)
 	} else {
