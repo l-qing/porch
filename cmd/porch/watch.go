@@ -1007,6 +1007,29 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 					}).Debug("gh-only probe failed")
 				}
 			}
+			if shouldRefreshPRStatusFromGH(c, mode, probeErr, res) {
+				ghRes, source, err := fallbackProbeFromGH(ctx, ghc, c, p.Name, p.PipelineRun)
+				if err != nil {
+					log.WithFields(logrus.Fields{
+						"component": c.Name,
+						"pipeline":  p.Name,
+						"run":       p.PipelineRun,
+						"sha":       c.SHA,
+						"error":     err.Error(),
+					}).Debug("pr authoritative probe from github failed")
+				} else if shouldOverrideProbeResultWithPRStatus(res, ghRes) {
+					previous := res
+					res = ghRes
+					emit(eventGHFallback, fmt.Sprintf("%s/%s PR mode prefer GH status (%s->%s)", c.Name, p.Name, previous.Status, ghRes.Status), logrus.Fields{
+						"component": c.Name,
+						"branch":    c.Branch,
+						"pipeline":  p.Name,
+						"run":       p.PipelineRun,
+						"sha":       c.SHA,
+						"reason":    "pr_authoritative_" + source,
+					})
+				}
+			}
 
 			status, nextErrs := watcher.DeriveStatusFromProbe(probeErr, res, p.QueryErrors, defaultQueryErrorThreshold)
 			if isStopping() {
@@ -1496,6 +1519,39 @@ func fallbackProbeFromGH(ctx context.Context, ghc *gh.Client, c *trackedComponen
 		return watcher.ProbeResult{}, "", err
 	}
 	return res, "gh_refreshed_sha", nil
+}
+
+func shouldRefreshPRStatusFromGH(c *trackedComponent, mode probeMode, probeErr error, kubectlResult watcher.ProbeResult) bool {
+	if c == nil || c.PRNumber <= 0 {
+		return false
+	}
+	if !useKubectlProbe(mode) || probeErr != nil {
+		return false
+	}
+	// PR mode treats GitHub check-runs as the source of truth for terminal state.
+	// Only refresh while kubectl still reports a non-terminal result.
+	switch kubectlResult.Status {
+	case pipestatus.StatusSucceeded, pipestatus.StatusFailed:
+		return false
+	default:
+		return true
+	}
+}
+
+func shouldOverrideProbeResultWithPRStatus(current, gh watcher.ProbeResult) bool {
+	switch gh.Status {
+	case pipestatus.StatusFailed, pipestatus.StatusSucceeded:
+		// Terminal GH states should override kubectl in PR mode, including stale RUN.
+		if current.Status != gh.Status || current.Conclusion != gh.Conclusion || current.Reason != gh.Reason {
+			return true
+		}
+	}
+
+	// Unknown kubectl payloads are less informative than GH running/watching states.
+	if current.Status == pipestatus.StatusUnknown {
+		return gh.Status == pipestatus.StatusRunning || gh.Status == pipestatus.StatusWatching
+	}
+	return false
 }
 
 func retryDryTarget(c *trackedComponent, sha string) string {
