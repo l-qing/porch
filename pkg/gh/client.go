@@ -169,6 +169,15 @@ type CheckRun struct {
 	} `json:"output"`
 }
 
+type PullRequest struct {
+	Number int    `json:"number"`
+	State  string `json:"state"`
+	Head   struct {
+		Ref string `json:"ref"`
+		SHA string `json:"sha"`
+	} `json:"head"`
+}
+
 func (c *Client) CheckRuns(ctx context.Context, repo, sha string) ([]CheckRun, error) {
 	path := fmt.Sprintf("repos/%s/%s/commits/%s/check-runs", c.org, repo, sha)
 	out, errOut, err := c.run(ctx, "api", path)
@@ -183,6 +192,26 @@ func (c *Client) CheckRuns(ctx context.Context, repo, sha string) ([]CheckRun, e
 		return nil, fmt.Errorf("decode check-runs response: %w", err)
 	}
 	return payload.CheckRuns, nil
+}
+
+func (c *Client) PullRequest(ctx context.Context, repo string, number int) (PullRequest, error) {
+	path := fmt.Sprintf("repos/%s/%s/pulls/%d", c.org, repo, number)
+	out, errOut, err := c.run(ctx, "api", path)
+	if err != nil {
+		return PullRequest{}, commandError([]string{"gh", "api", path}, errOut, err)
+	}
+
+	pr := PullRequest{}
+	if err := json.Unmarshal(out, &pr); err != nil {
+		return PullRequest{}, fmt.Errorf("decode pull request response: %w", err)
+	}
+	if pr.Number == 0 {
+		return PullRequest{}, fmt.Errorf("empty pull request number for %s/%s#%d", c.org, repo, number)
+	}
+	if strings.TrimSpace(pr.Head.Ref) == "" {
+		return PullRequest{}, fmt.Errorf("empty pull request head ref for %s/%s#%d", c.org, repo, number)
+	}
+	return pr, nil
 }
 
 type CheckRunAnnotation struct {
@@ -207,6 +236,15 @@ func (c *Client) CheckRunAnnotations(ctx context.Context, repo string, checkRunI
 
 func (c *Client) CreateCommitComment(ctx context.Context, repo, sha, body string) error {
 	path := fmt.Sprintf("repos/%s/%s/commits/%s/comments", c.org, repo, sha)
+	_, errOut, err := c.run(ctx, "api", path, "-f", "body="+body)
+	if err != nil {
+		return commandError([]string{"gh", "api", path, "-f", "body=<redacted>"}, errOut, err)
+	}
+	return nil
+}
+
+func (c *Client) CreatePullRequestComment(ctx context.Context, repo string, number int, body string) error {
+	path := fmt.Sprintf("repos/%s/%s/issues/%d/comments", c.org, repo, number)
 	_, errOut, err := c.run(ctx, "api", path, "-f", "body="+body)
 	if err != nil {
 		return commandError([]string{"gh", "api", path, "-f", "body=<redacted>"}, errOut, err)

@@ -48,6 +48,7 @@ type trackedComponent struct {
 	Repo      string
 	Branch    string
 	SHA       string
+	PRNumber  int
 	Pipelines map[string]*trackedPipeline
 }
 
@@ -60,6 +61,7 @@ type watchOptions struct {
 	pipelineName   string
 	branch         string
 	branchPattern  string
+	prs            string
 	dryRun         bool
 }
 
@@ -139,6 +141,7 @@ func newWatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.pipelineName, "pipeline", "", "watch only one pipeline under selected component")
 	cmd.Flags().StringVar(&opts.branch, "branch", "", "override selected component branch at runtime")
 	cmd.Flags().StringVar(&opts.branchPattern, "branch-pattern", "", "select branches by regular expression under selected component")
+	cmd.Flags().StringVar(&opts.prs, "prs", "", "comma-separated pull request numbers, e.g. 123,456")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "query only, do not trigger retry")
 	mustBindPFlag(viperKeyWatchConfig, cmd, "config")
 	mustBindPFlag(viperKeyWatchStateFile, cmd, "state-file")
@@ -182,24 +185,46 @@ func runWatch(opts watchOptions) error {
 	}
 
 	ghc := gh.NewClient(cfg.Root.Connection.GitHubOrg, nil)
-	componentsForPattern, skipPatternResolution := selectComponentsForPatternResolution(cfg.Components, opts)
-	if skipPatternResolution {
-		log.WithFields(logrus.Fields{
-			"component_scope": normalize(strings.TrimSpace(opts.componentName)),
-			"pipeline_scope":  normalize(strings.TrimSpace(opts.pipelineName)),
-		}).Debug("skip global branch pattern expansion for unresolved scoped watch")
+	prNumbers, err := parsePRNumbers(opts.prs)
+	if err != nil {
+		return err
+	}
+	scopedMode := false
+	if len(prNumbers) > 0 {
+		// PR mode binds runtime targets to explicit PR numbers and uses PR head refs as branches.
+		if strings.TrimSpace(opts.componentName) == "" {
+			return fmt.Errorf("--prs requires --component")
+		}
+		if strings.TrimSpace(opts.branch) != "" {
+			return fmt.Errorf("--prs and --branch are mutually exclusive")
+		}
+		if strings.TrimSpace(opts.branchPattern) != "" {
+			return fmt.Errorf("--prs and --branch-pattern are mutually exclusive")
+		}
+		if err := applyWatchPRScope(ctx, &cfg, strings.TrimSpace(opts.componentName), strings.TrimSpace(opts.pipelineName), prNumbers, ghc); err != nil {
+			return err
+		}
+		scopedMode = true
 	} else {
-		cfg.Components = componentsForPattern
-		cfg, err = resolvePatternComponents(ctx, cfg, ghc)
+		componentsForPattern, skipPatternResolution := selectComponentsForPatternResolution(cfg.Components, opts)
+		if skipPatternResolution {
+			log.WithFields(logrus.Fields{
+				"component_scope": normalize(strings.TrimSpace(opts.componentName)),
+				"pipeline_scope":  normalize(strings.TrimSpace(opts.pipelineName)),
+			}).Debug("skip global branch pattern expansion for unresolved scoped watch")
+		} else {
+			cfg.Components = componentsForPattern
+			cfg, err = resolvePatternComponents(ctx, cfg, ghc)
+			if err != nil {
+				return err
+			}
+		}
+		scopedMode, err = applyWatchScopeWithBranchLister(ctx, &cfg, opts, ghc)
 		if err != nil {
 			return err
 		}
 	}
 	notifyRowsPerMessage := resolveNotifyRowsPerMessage(cfg.Root.Notification.NotifyRowsPerMessage)
-	scopedMode, err := applyWatchScopeWithBranchLister(ctx, &cfg, opts, ghc)
-	if err != nil {
-		return err
-	}
 	log.WithFields(logrus.Fields{
 		"config":               opts.configPath,
 		"components_file":      cfg.Root.ComponentsFile,
@@ -208,6 +233,7 @@ func runWatch(opts watchOptions) error {
 		"pipeline_scope":       normalize(strings.TrimSpace(opts.pipelineName)),
 		"branch_override":      normalize(strings.TrimSpace(opts.branch)),
 		"branch_pattern_scope": normalize(strings.TrimSpace(opts.branchPattern)),
+		"prs":                  normalize(strings.TrimSpace(opts.prs)),
 		"scoped_mode":          fmt.Sprintf("%t", scopedMode),
 		"final_branch":         normalize(opts.finalBranch),
 		"disable_final_action": fmt.Sprintf("%t", opts.disableFinalAction || cfg.Root.DisableFinalAction),
@@ -548,6 +574,66 @@ func applyWatchScope(cfg *config.RuntimeConfig, opts watchOptions) (bool, error)
 	return applyWatchScopeWithBranchLister(context.Background(), cfg, opts, nil)
 }
 
+func applyWatchPRScope(ctx context.Context, cfg *config.RuntimeConfig, componentName, pipelineName string, prs []int, ghc *gh.Client) error {
+	selected := matchComponentsBySelector(cfg.Components, componentName)
+	if len(selected) == 0 {
+		if pipelineName == "" {
+			return fmt.Errorf("component %q not found", componentName)
+		}
+		// Ad-hoc mode uses component selector as repo name and requires pipeline to build retry command.
+		selected = []config.LoadedComponent{buildAdHocComponent(componentName, pipelineName, "")}
+	}
+	repo := strings.TrimSpace(selected[0].Repo)
+	if repo == "" {
+		return fmt.Errorf("component %q repo is empty", componentName)
+	}
+	for _, c := range selected[1:] {
+		if strings.TrimSpace(c.Repo) != repo {
+			return fmt.Errorf("component %q maps to multiple repos in config", componentName)
+		}
+	}
+	base := selected[0]
+	if pipelineName != "" {
+		filtered := make([]config.PipelineSpec, 0, 1)
+		for _, p := range base.Pipelines {
+			if p.Name == pipelineName {
+				filtered = append(filtered, p)
+			}
+		}
+		if len(filtered) == 0 {
+			return fmt.Errorf("pipeline %q not found under component %q", pipelineName, componentName)
+		}
+		base.Pipelines = filtered
+	}
+
+	expanded := make([]config.LoadedComponent, 0, len(prs))
+	seenNames := map[string]struct{}{}
+	baseName := runtimeComponentBaseName(base)
+	for _, number := range prs {
+		pr, err := ghc.PullRequest(ctx, repo, number)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(pr.State) != "open" {
+			return fmt.Errorf("pull request %s/%s#%d is not open (state=%s)", cfg.Root.Connection.GitHubOrg, repo, number, pr.State)
+		}
+		name := fmt.Sprintf("%s#%d", baseName, pr.Number)
+		if _, ok := seenNames[name]; ok {
+			return fmt.Errorf("duplicated runtime component name %q in --prs expansion", name)
+		}
+		seenNames[name] = struct{}{}
+		expanded = append(expanded, config.LoadedComponent{
+			Name:      name,
+			Repo:      repo,
+			Branch:    strings.TrimSpace(pr.Head.Ref),
+			Pipelines: base.Pipelines,
+			PRNumber:  pr.Number,
+		})
+	}
+	cfg.Components = expanded
+	return nil
+}
+
 func applyWatchScopeWithBranchLister(ctx context.Context, cfg *config.RuntimeConfig, opts watchOptions, lister branchLister) (bool, error) {
 	componentName := strings.TrimSpace(opts.componentName)
 	pipelineName := strings.TrimSpace(opts.pipelineName)
@@ -781,13 +867,26 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 					body := strings.ReplaceAll(p.RetryCmd, "{branch}", c.Branch)
 					attempt := p.RetryCount + 1
 					if dryRun {
-						emit(eventDryRetry, fmt.Sprintf("would comment on %s@%s: %s", c.Repo, sha[:8], body), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": sha, "attempt": fmt.Sprintf("%d", attempt)})
+						target := fmt.Sprintf("%s@%s", c.Repo, sha[:8])
+						if c.PRNumber > 0 {
+							target = fmt.Sprintf("%s#%d", c.Repo, c.PRNumber)
+						}
+						emit(eventDryRetry, fmt.Sprintf("would comment on %s: %s", target, body), logrus.Fields{"component": c.Name, "branch": c.Branch, "pr": fmt.Sprintf("%d", c.PRNumber), "pipeline": p.Name, "sha": sha, "attempt": fmt.Sprintf("%d", attempt)})
 					} else {
-						if err := ghc.CreateCommitComment(ctx, c.Repo, sha, body); err != nil {
-							if isStopping() {
-								return errWatchStopRequested
+						if c.PRNumber > 0 {
+							if err := ghc.CreatePullRequestComment(ctx, c.Repo, c.PRNumber, body); err != nil {
+								if isStopping() {
+									return errWatchStopRequested
+								}
+								return fmt.Errorf("trigger retry for %s/%s on pull request #%d: %w", c.Name, p.Name, c.PRNumber, err)
 							}
-							return fmt.Errorf("trigger retry for %s/%s: %w", c.Name, p.Name, err)
+						} else {
+							if err := ghc.CreateCommitComment(ctx, c.Repo, sha, body); err != nil {
+								if isStopping() {
+									return errWatchStopRequested
+								}
+								return fmt.Errorf("trigger retry for %s/%s: %w", c.Name, p.Name, err)
+							}
 						}
 					}
 					settleAfter := time.Now().Add(cfg.Root.Retry.RetrySettleDelay.Duration)
@@ -1027,6 +1126,7 @@ func toTracked(cfg config.RuntimeConfig, rs []component.RuntimeComponent) (map[s
 			Repo:      r.Repo,
 			Branch:    r.Branch,
 			SHA:       r.SHA,
+			PRNumber:  0,
 			Pipelines: map[string]*trackedPipeline{},
 		}
 		for _, p := range r.Pipelines {
@@ -1053,6 +1153,7 @@ func toTracked(cfg config.RuntimeConfig, rs []component.RuntimeComponent) (map[s
 			}
 			tp.RetryCmd = p.RetryCommand
 		}
+		tc.PRNumber = c.PRNumber
 	}
 
 	return byName, nil

@@ -81,6 +81,7 @@ make build
 - `--component`：组件名（必填）
 - `--pipeline`：流水线名（可选）
 - `--branch`：运行时覆盖目标分支（可选，不会修改配置文件）
+- `--prs`：PR 编号列表，逗号分隔（可选，例如 `123,456`）
 - `--force`：即使目标流水线已成功也强制触发重试（可选）
 - `--dry-run`：只打印，不发送 gh comment
 
@@ -100,6 +101,7 @@ make build
 - `--pipeline`：仅监控指定组件下的某条流水线（可选，需配合 `--component`）
 - `--branch`：仅覆盖 `--component` 对应组件分支（可选，需配合 `--component`）
 - `--branch-pattern`: filter multiple branches under `--component` using Go regexp (optional, requires `--component`, mutually exclusive with `--branch`, example: `^(main|release-[0-9]+[.][0-9]+)$`)
+- `--prs`：PR 编号列表，逗号分隔（可选，需配合 `--component`；与 `--branch` / `--branch-pattern` 互斥）
 - `--exit-after-final-ok`：`FINAL_OK` 后立即退出（默认不退出，保持常驻）
 - `--dry-run`：监控与计算执行，但不发送重试/final comment
 
@@ -118,12 +120,20 @@ Ad-hoc repo mode:
 - If `--branch` is not provided, branch defaults to `main`.
 - `--branch-pattern` is supported in this mode and will expand multiple ad-hoc runtime components by querying repo branches and applying the regexp.
 
+PR mode:
+
+- `--prs` expands runtime targets by PR numbers directly and uses each PR `head.ref` as runtime branch.
+- Retry comments are sent to PR comments (`issues/{number}/comments`) instead of commit comments.
+- `--prs` and `--branch` / `--branch-pattern` are mutually exclusive.
+
 Example:
 
 ```bash
 ./bin/porch watch --config ./config.yaml --component tektoncd-operator --pipeline to-all-in-one --branch main --exit-after-final-ok
 
 ./bin/porch watch --config ./config.yaml --component tektoncd-operator --pipeline to-all-in-one --branch-pattern "^(main|release-.*)$" --exit-after-final-ok
+
+./bin/porch watch --config ./config.yaml --component catalog --pipeline catalog-all-in-one --prs 123,456 --exit-after-final-ok
 ```
 
 ## 环境变量映射（viper）

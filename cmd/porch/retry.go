@@ -21,6 +21,7 @@ type retryOptions struct {
 	componentName string
 	pipelineName  string
 	branch        string
+	prs           string
 	force         bool
 	dryRun        bool
 }
@@ -42,6 +43,7 @@ func newRetryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.componentName, "component", "", "component name")
 	cmd.Flags().StringVar(&opts.pipelineName, "pipeline", "", "pipeline name")
 	cmd.Flags().StringVar(&opts.branch, "branch", "", "override target branch at runtime")
+	cmd.Flags().StringVar(&opts.prs, "prs", "", "comma-separated pull request numbers, e.g. 123,456")
 	cmd.Flags().BoolVar(&opts.force, "force", false, "force retry even if pipeline already succeeded")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "do not send gh comments")
 	_ = cmd.MarkFlagRequired("component")
@@ -63,9 +65,18 @@ func runRetry(opts retryOptions) error {
 	ghc := gh.NewClient(cfg.Root.Connection.GitHubOrg, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	cfg, err = resolvePatternComponents(ctx, cfg, ghc)
+	prNumbers, err := parsePRNumbers(opts.prs)
 	if err != nil {
 		return err
+	}
+	if len(prNumbers) > 0 && strings.TrimSpace(opts.branch) != "" {
+		return fmt.Errorf("--prs and --branch are mutually exclusive")
+	}
+	if len(prNumbers) == 0 {
+		cfg, err = resolvePatternComponents(ctx, cfg, ghc)
+		if err != nil {
+			return err
+		}
 	}
 
 	target, err := resolveRetryTarget(cfg.Components, strings.TrimSpace(opts.componentName), strings.TrimSpace(opts.branch), strings.TrimSpace(opts.pipelineName))
@@ -80,74 +91,108 @@ func runRetry(opts retryOptions) error {
 		"component": opts.componentName,
 		"pipeline":  normalize(opts.pipelineName),
 		"branch":    branch,
+		"prs":       normalize(strings.TrimSpace(opts.prs)),
 		"force":     fmt.Sprintf("%t", opts.force),
 		"dry_run":   fmt.Sprintf("%t", opts.dryRun),
 		"config":    opts.configPath,
 	}).Info("retry command initialized")
 
-	sha, err := ghc.BranchSHA(ctx, target.Repo, branch)
-	if err != nil {
-		return err
+	type retryRef struct {
+		branch string
+		pr     int
+	}
+	refs := make([]retryRef, 0, 1)
+	if len(prNumbers) == 0 {
+		refs = append(refs, retryRef{branch: branch})
+	} else {
+		for _, pr := range prNumbers {
+			info, err := ghc.PullRequest(ctx, target.Repo, pr)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(info.State) != "open" {
+				return fmt.Errorf("pull request %s/%s#%d is not open (state=%s)", cfg.Root.Connection.GitHubOrg, target.Repo, pr, info.State)
+			}
+			refs = append(refs, retryRef{
+				branch: strings.TrimSpace(info.Head.Ref),
+				pr:     info.Number,
+			})
+		}
 	}
 
-	checkRuns, err := ghc.CheckRuns(ctx, target.Repo, sha)
-	if err != nil {
-		// Manual retry should remain available even when status lookup is degraded.
-		logEvent(log, "RETRY_WARN", fmt.Sprintf("check-runs query failed, fallback to direct retry trigger: %v", err), logrus.Fields{
-			"component": target.Name,
-			"branch":    branch,
-			"sha":       sha[:8],
-		})
-		checkRuns = nil
-	}
-
-	matched := 0
+	matchedTotal := 0
 	triggered := 0
 	skippedSucceeded := 0
-	for _, p := range target.Pipelines {
-		if opts.pipelineName != "" && p.Name != opts.pipelineName {
-			continue
-		}
-		matched++
-
-		if !opts.force && shouldSkipRetryBySuccess(checkRuns, p.Name) {
-			skippedSucceeded++
-			// Default behavior is conservative: do not retrigger already-successful
-			// pipeline unless user explicitly opts in with --force.
-			logEvent(log, "MANUAL_SKIP", "pipeline already succeeded on current commit, skip retry", logrus.Fields{
-				"component": target.Name,
-				"pipeline":  p.Name,
-				"branch":    branch,
-				"sha":       sha[:8],
-			})
-			continue
-		}
-
-		body := strings.ReplaceAll(p.RetryCommand, "{branch}", branch)
-		logEvent(log, "MANUAL_RETRY", "trigger retry comment", logrus.Fields{
-			"component": target.Name,
-			"pipeline":  p.Name,
-			"branch":    branch,
-			"sha":       sha[:8],
-			"command":   body,
-			"dry_run":   fmt.Sprintf("%t", opts.dryRun),
-		})
-
-		if opts.dryRun {
-			continue
-		}
-		if err := ghc.CreateCommitComment(ctx, target.Repo, sha, body); err != nil {
+	for _, ref := range refs {
+		sha, err := ghc.BranchSHA(ctx, target.Repo, ref.branch)
+		if err != nil {
 			return err
 		}
-		triggered++
+		checkRuns, err := ghc.CheckRuns(ctx, target.Repo, sha)
+		if err != nil {
+			// Manual retry should remain available even when status lookup is degraded.
+			logEvent(log, "RETRY_WARN", fmt.Sprintf("check-runs query failed, fallback to direct retry trigger: %v", err), logrus.Fields{
+				"component": target.Name,
+				"branch":    ref.branch,
+				"pr":        fmt.Sprintf("%d", ref.pr),
+				"sha":       sha[:8],
+			})
+			checkRuns = nil
+		}
+
+		for _, p := range target.Pipelines {
+			if opts.pipelineName != "" && p.Name != opts.pipelineName {
+				continue
+			}
+			matchedTotal++
+
+			if !opts.force && shouldSkipRetryBySuccess(checkRuns, p.Name) {
+				skippedSucceeded++
+				// Default behavior is conservative: do not retrigger already-successful
+				// pipeline unless user explicitly opts in with --force.
+				logEvent(log, "MANUAL_SKIP", "pipeline already succeeded on current commit, skip retry", logrus.Fields{
+					"component": target.Name,
+					"pipeline":  p.Name,
+					"branch":    ref.branch,
+					"pr":        fmt.Sprintf("%d", ref.pr),
+					"sha":       sha[:8],
+				})
+				continue
+			}
+
+			body := strings.ReplaceAll(p.RetryCommand, "{branch}", ref.branch)
+			logEvent(log, "MANUAL_RETRY", "trigger retry comment", logrus.Fields{
+				"component": target.Name,
+				"pipeline":  p.Name,
+				"branch":    ref.branch,
+				"pr":        fmt.Sprintf("%d", ref.pr),
+				"sha":       sha[:8],
+				"command":   body,
+				"dry_run":   fmt.Sprintf("%t", opts.dryRun),
+			})
+
+			if opts.dryRun {
+				continue
+			}
+			if ref.pr > 0 {
+				if err := ghc.CreatePullRequestComment(ctx, target.Repo, ref.pr, body); err != nil {
+					return err
+				}
+			} else {
+				if err := ghc.CreateCommitComment(ctx, target.Repo, sha, body); err != nil {
+					return err
+				}
+			}
+			triggered++
+		}
 	}
 
-	if opts.pipelineName != "" && matched == 0 && !opts.dryRun {
+	if opts.pipelineName != "" && matchedTotal == 0 && !opts.dryRun {
 		return fmt.Errorf("pipeline %q not found under component %q", opts.pipelineName, target.Name)
 	}
 
 	if opts.dryRun {
-		fmt.Printf("dry-run finished, to-trigger=%d, skipped_succeeded=%d\n", matched-skippedSucceeded, skippedSucceeded)
+		fmt.Printf("dry-run finished, to-trigger=%d, skipped_succeeded=%d\n", matchedTotal-skippedSucceeded, skippedSucceeded)
 	} else {
 		fmt.Printf("triggered %d retry command(s), skipped %d succeeded pipeline(s)\n", triggered, skippedSucceeded)
 	}

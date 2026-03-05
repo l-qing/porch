@@ -99,6 +99,7 @@ type LoadedComponent struct {
 	Branch         string
 	BranchPatterns []string
 	Pipelines      []PipelineSpec
+	PRNumber       int
 }
 
 type RuntimeConfig struct {
