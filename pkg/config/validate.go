@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -15,6 +16,17 @@ func ValidateRoot(root Root) error {
 	}
 	if root.Connection.GitHubOrg == "" {
 		return fmt.Errorf("connection.github_org is required")
+	}
+	if baseURL := strings.TrimSpace(root.Connection.PipelineConsoleBaseURL); baseURL != "" {
+		parsed, err := url.ParseRequestURI(baseURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("connection.pipeline_console_base_url must be an absolute URL")
+		}
+	}
+	if workspaceName := strings.TrimSpace(root.Connection.PipelineWorkspaceName); workspaceName != "" {
+		if strings.ContainsAny(workspaceName, "/~") {
+			return fmt.Errorf("connection.pipeline_workspace_name must not contain '/' or '~'")
+		}
 	}
 	if root.ComponentsFile == "" {
 		return fmt.Errorf("components_file is required")

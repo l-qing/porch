@@ -7,6 +7,8 @@ connection:
   kubeconfig: ~/.kube/config
   context: ""
   github_org: TestGroup
+  pipeline_console_base_url: https://edge.alauda.cn/console-pipeline-v2
+  pipeline_workspace_name: business-build
 
 watch:
   interval: 2s

@@ -321,7 +321,7 @@ func runWatch(opts watchOptions) error {
 		}
 
 		allSucceeded := allComponentsSucceeded(tracked)
-		rows := toRows(tracked, cfg.Root.Connection.GitHubOrg)
+		rows := toRows(tracked, cfg.Root.Connection)
 		if allSucceeded && !allSucceededNotified {
 			now := time.Now().UTC()
 			kind := eventAllOK
@@ -398,14 +398,14 @@ func runWatch(opts watchOptions) error {
 		}
 		if pi := cfg.Root.Notification.ProgressInterval.Duration; pi > 0 && time.Since(lastProgressAt) >= pi {
 			emit(eventNotifyProgress, fmt.Sprintf("sending progress report elapsed=%s", time.Since(startedAt).Truncate(time.Second)), nil)
-			if err := notifyMarkdownInChunks(context.Background(), wecom, notify.EventProgressReport, toRows(tracked, cfg.Root.Connection.GitHubOrg), notifyRowsPerMessage, func(chunk []tui.Row, page, total int) string {
+			if err := notifyMarkdownInChunks(context.Background(), wecom, notify.EventProgressReport, toRows(tracked, cfg.Root.Connection), notifyRowsPerMessage, func(chunk []tui.Row, page, total int) string {
 				return buildProgressMarkdown(chunk, startedAt, time.Now().UTC(), page, total)
 			}); err != nil {
 				emit(eventNotifyErr, err.Error(), logrus.Fields{"error": err.Error()})
 			}
 			lastProgressAt = time.Now()
 		}
-		renderer.Render(toRows(tracked, cfg.Root.Connection.GitHubOrg))
+		renderer.Render(toRows(tracked, cfg.Root.Connection))
 		return false, nil
 	}
 
@@ -1384,7 +1384,8 @@ func firstNamespace(pipelines map[string]*trackedPipeline) string {
 	return ""
 }
 
-func toRows(tracked map[string]*trackedComponent, org string) []tui.Row {
+func toRows(tracked map[string]*trackedComponent, conn config.Connection) []tui.Row {
+	org := conn.GitHubOrg
 	rows := []tui.Row{}
 	for _, c := range tracked {
 		for _, p := range c.Pipelines {
@@ -1395,6 +1396,7 @@ func toRows(tracked map[string]*trackedComponent, org string) []tui.Row {
 				Status:    p.Status,
 				Retries:   p.RetryCount,
 				Run:       normalize(p.PipelineRun),
+				RunURL:    pipelineRunDetailURL(p.Namespace, p.PipelineRun, conn),
 				CommitURL: commitChecksURL(org, c.Repo, c.SHA),
 				BranchURL: branchCommitsURL(org, c.Repo, c.Branch),
 			})

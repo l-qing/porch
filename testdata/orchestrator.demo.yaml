@@ -8,6 +8,8 @@ connection:
   kubeconfig: ~/.kube/config
   context: ""                        # 可选，指定 k8s context；为空则用 current-context
   github_org: TestGroup           # GitHub 组织名
+  pipeline_console_base_url: https://edge.alauda.cn/console-pipeline-v2   # Optional: pipeline console base URL
+  pipeline_workspace_name: business-build                                  # Optional: workspace middle segment in detail URL
 
 # ── 监控配置 ──
 watch:

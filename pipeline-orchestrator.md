@@ -109,6 +109,8 @@ connection:
   kubeconfig: ~/.kube/config         # 或读取 KUBECONFIG 环境变量
   context: ""                        # 可选，指定 k8s context；为空则用 current-context
   github_org: TestGroup           # GitHub 组织名
+  pipeline_console_base_url: https://edge.alauda.cn/console-pipeline-v2   # Optional: pipeline console base URL
+  pipeline_workspace_name: business-build                                  # Optional: workspace middle segment in detail URL
 
 # ── 监控配置 ──
 watch:
@@ -483,19 +485,22 @@ kubectl/GH 查询可能因网络或集群临时问题失败。此类查询失败
    该流水线会自动执行 make update-components 并提交 PR。
 
 5. 发送企业微信通知：所有组件已成功，final_action 已触发。
-   通知内容包含可跳转链接（commit checks / branch），便于快速定位。
+   Notification includes jump links (commit checks / branch / PipelineRun detail), which makes triage faster.
 
 6. GH API 消耗：2 请求
 ```
 
 ### 6.7 通知内容与跳转链接
 
-为了减少人工排障时间，企业微信通知会带可点击链接：
+To reduce manual triage time, WeCom notifications include clickable links:
 
-- `component` 链接到该组件当前 commit 的 checks 页面：
+- `component` links to the current commit checks page:
   `https://github.com/{org}/{repo}/commit/{sha}/checks`
-- `branch` 链接到仓库分支 commits 页面：
+- `branch` links to the branch commits page:
   `https://github.com/{org}/{repo}/commits/{branch}/`
+- `pipeline` links to the PipelineRun detail page:
+  `{pipeline_console_base_url}/workspace/{namespace}~{workspace_name}~{namespace}/pipeline/pipelineRuns/detail/{pipelinerun}`
+  (rendered directly in the `Pipeline` column; no extra `RunURL` column in webhook table)
 
 发送策略（由 `notification.events` 控制）：
 
@@ -849,7 +854,9 @@ porch/
 从 GitHub check-run 的 `details_url` 中解析 PipelineRun 的命名空间。
 已确认当前 URL 模式为：
 
-`/workspace/<namespace>~business-build~<namespace>/pipeline/pipelineRuns/detail/<pipelinerun_name>`
+`/workspace/<namespace>~<workspace_name>~<namespace>/pipeline/pipelineRuns/detail/<pipelinerun_name>`
+
+`<workspace_name>` defaults to `business-build` and can be overridden by `connection.pipeline_workspace_name`.
 
 实现中会校验两个 `<namespace>` 一致后再使用；若不一致或解析失败则记录 detection notes。
 

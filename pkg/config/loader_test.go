@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -395,4 +396,134 @@ components:
 	if got := cfg.Root.Notification.NotifyRowsPerMessage; got != 7 {
 		t.Fatalf("notify_rows_per_message = %d, want 7", got)
 	}
+}
+
+func TestLoadWithPipelineConsoleSettings(t *testing.T) {
+	dir := t.TempDir()
+	orchestrator := filepath.Join(dir, "orchestrator.yaml")
+	components := filepath.Join(dir, "components.yaml")
+
+	if err := os.WriteFile(orchestrator, []byte(`apiVersion: porch/v1
+kind: ReleaseOrchestration
+metadata: {name: test}
+connection:
+  github_org: TestGroup
+  pipeline_console_base_url: https://edge-prod.alauda.cn/console-pipeline-v2
+  pipeline_workspace_name: business-release
+watch: {interval: 30s}
+retry:
+  max_retries: 1
+  backoff: {initial: 1m, multiplier: 1.5, max: 5m}
+timeout: {global: 1h}
+components_file: ./components.yaml
+components:
+  - name: tektoncd-pipeline
+    repo: tektoncd-pipeline
+    pipelines:
+      - name: tp-all-in-one
+        retry_command: x
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(components, []byte(`tektoncd-pipeline: {revision: main}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(orchestrator)
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if got := cfg.Root.Connection.PipelineConsoleBaseURL; got != "https://edge-prod.alauda.cn/console-pipeline-v2" {
+		t.Fatalf("pipeline_console_base_url = %q, want https://edge-prod.alauda.cn/console-pipeline-v2", got)
+	}
+	if got := cfg.Root.Connection.PipelineWorkspaceName; got != "business-release" {
+		t.Fatalf("pipeline_workspace_name = %q, want business-release", got)
+	}
+}
+
+func TestLoadRejectsInvalidPipelineConsoleBaseURL(t *testing.T) {
+	dir := t.TempDir()
+	orchestrator := filepath.Join(dir, "orchestrator.yaml")
+	components := filepath.Join(dir, "components.yaml")
+
+	if err := os.WriteFile(orchestrator, []byte(`apiVersion: porch/v1
+kind: ReleaseOrchestration
+metadata: {name: test}
+connection:
+  github_org: TestGroup
+  pipeline_console_base_url: edge-prod.alauda.cn/console-pipeline-v2
+watch: {interval: 30s}
+retry:
+  max_retries: 1
+  backoff: {initial: 1m, multiplier: 1.5, max: 5m}
+timeout: {global: 1h}
+components_file: ./components.yaml
+components:
+  - name: tektoncd-pipeline
+    repo: tektoncd-pipeline
+    pipelines:
+      - name: tp-all-in-one
+        retry_command: x
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(components, []byte(`tektoncd-pipeline: {revision: main}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(orchestrator)
+	if err == nil {
+		t.Fatal("expected error for invalid pipeline_console_base_url")
+	}
+	if got := err.Error(); got == "" || !containsAll(got, "pipeline_console_base_url", "absolute URL") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidPipelineWorkspaceName(t *testing.T) {
+	dir := t.TempDir()
+	orchestrator := filepath.Join(dir, "orchestrator.yaml")
+	components := filepath.Join(dir, "components.yaml")
+
+	if err := os.WriteFile(orchestrator, []byte(`apiVersion: porch/v1
+kind: ReleaseOrchestration
+metadata: {name: test}
+connection:
+  github_org: TestGroup
+  pipeline_workspace_name: business/release
+watch: {interval: 30s}
+retry:
+  max_retries: 1
+  backoff: {initial: 1m, multiplier: 1.5, max: 5m}
+timeout: {global: 1h}
+components_file: ./components.yaml
+components:
+  - name: tektoncd-pipeline
+    repo: tektoncd-pipeline
+    pipelines:
+      - name: tp-all-in-one
+        retry_command: x
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(components, []byte(`tektoncd-pipeline: {revision: main}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(orchestrator)
+	if err == nil {
+		t.Fatal("expected error for invalid pipeline_workspace_name")
+	}
+	if got := err.Error(); got == "" || !containsAll(got, "pipeline_workspace_name", "must not contain") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func containsAll(text string, parts ...string) bool {
+	for _, part := range parts {
+		if !strings.Contains(text, part) {
+			return false
+		}
+	}
+	return true
 }

@@ -189,6 +189,8 @@ connection:
   github_org: TestGroup
   kubeconfig: ""
   context: ""
+  pipeline_console_base_url: https://edge.alauda.cn/console-pipeline-v2
+  pipeline_workspace_name: business-build
 
 watch:
   interval: 30s
@@ -298,10 +300,11 @@ components:
 - `component_exhausted`：某组件重试耗尽
 - `global_timeout`：全局超时（可选，通常与终端 `TIMEOUT` 日志重复）
 
-通知中的表格会包含跳转链接：
+Webhook markdown table includes jump links:
 
-- `component` 链接到对应 commit checks 页面
-- `branch` 链接到仓库 branch 页面
+- `component` links to the commit checks page.
+- `branch` links to the branch commits page.
+- `pipeline` links to the PipelineRun detail page (embedded in the `Pipeline` column, no extra column added).
 
 推荐配置示例：
 

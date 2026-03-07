@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"porch/pkg/component"
+	"porch/pkg/config"
 	"porch/pkg/gh"
 	pipestatus "porch/pkg/pipeline"
 	"porch/pkg/tui"
@@ -72,11 +73,14 @@ func runStatus(opts statusOptions) error {
 	}).Info("status command initialized")
 	logEvent(log, "INIT", fmt.Sprintf("loaded %d components", len(components)), nil)
 	logEvent(log, "PROBE_MODE", fmt.Sprintf("probe mode=%s", mode), logrus.Fields{"mode": string(mode)})
-	printStatusTable(ctx, log, ghc, mode, cfg.Root.Connection.GitHubOrg, cfg.Root.Connection.Kubeconfig, cfg.Root.Connection.Context, components)
+	printStatusTable(ctx, log, ghc, mode, cfg.Root.Connection, components)
 	return nil
 }
 
-func printStatusTable(ctx context.Context, log *logrus.Logger, ghc *gh.Client, mode probeMode, org, kubeconfig, kubeContext string, components []component.RuntimeComponent) {
+func printStatusTable(ctx context.Context, log *logrus.Logger, ghc *gh.Client, mode probeMode, conn config.Connection, components []component.RuntimeComponent) {
+	org := conn.GitHubOrg
+	kubeconfig := conn.Kubeconfig
+	kubeContext := conn.Context
 	rows := make([]tui.Row, 0, len(components))
 	for _, c := range components {
 		for _, p := range c.Pipelines {
@@ -135,6 +139,7 @@ func printStatusTable(ctx context.Context, log *logrus.Logger, ghc *gh.Client, m
 				Status:    st,
 				Retries:   0,
 				Run:       normalize(p.PipelineRun),
+				RunURL:    pipelineRunDetailURL(p.Namespace, p.PipelineRun, conn),
 			})
 		}
 	}

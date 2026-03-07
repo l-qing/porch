@@ -24,9 +24,11 @@ type Metadata struct {
 }
 
 type Connection struct {
-	Kubeconfig string `yaml:"kubeconfig"`
-	Context    string `yaml:"context"`
-	GitHubOrg  string `yaml:"github_org"`
+	Kubeconfig             string `yaml:"kubeconfig"`
+	Context                string `yaml:"context"`
+	GitHubOrg              string `yaml:"github_org"`
+	PipelineConsoleBaseURL string `yaml:"pipeline_console_base_url"`
+	PipelineWorkspaceName  string `yaml:"pipeline_workspace_name"`
 }
 
 type Watch struct {

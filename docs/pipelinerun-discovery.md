@@ -50,7 +50,7 @@
 已基于 11 个组件最新 check-run `details_url` 样本核验：
 
 ```
-https://edge.example.com/console-pipeline-v2/workspace/<namespace>~business-build~<namespace>/pipeline/pipelineRuns/detail/<pipelinerun_name>
+https://edge.example.com/console-pipeline-v2/workspace/<namespace>~<workspace_name>~<namespace>/pipeline/pipelineRuns/detail/<pipelinerun_name>
 ```
 
 示例：
@@ -58,6 +58,8 @@ https://edge.example.com/console-pipeline-v2/workspace/<namespace>~business-buil
 ```
 https://edge.example.com/console-pipeline-v2/workspace/devops~business-build~devops/pipeline/pipelineRuns/detail/tp-all-in-one-2wn4t
 ```
+
+`<workspace_name>` defaults to `business-build` and can be overridden by `connection.pipeline_workspace_name`.
 
 解析规则：
 
