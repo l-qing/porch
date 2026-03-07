@@ -55,6 +55,7 @@ type trackedComponent struct {
 type watchOptions struct {
 	commonOptions
 	stateFile      string
+	stateFileSrc   string
 	finalBranch    string
 	exitAfterFinal bool
 	componentName  string
@@ -71,6 +72,7 @@ const (
 	eventRecoverSkip    watchEventKind = "RECOVER_SKIP"
 	eventRecover        watchEventKind = "RECOVER"
 	eventRecoverWarn    watchEventKind = "RECOVER_WARN"
+	eventStateFile      watchEventKind = "STATE_FILE"
 	eventInit           watchEventKind = "INIT"
 	eventProbeMode      watchEventKind = "PROBE_MODE"
 	eventScope          watchEventKind = "SCOPE"
@@ -122,10 +124,9 @@ func newWatchCmd() *cobra.Command {
 		Short: "Continuously watch pipelines and auto-retry",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.complete(viperKeyWatchConfig)
-			opts.stateFile = firstNonEmpty(
-				strings.TrimSpace(opts.stateFile),
-				strings.TrimSpace(viper.GetString(viperKeyWatchStateFile)),
-				defaultStateFile,
+			opts.stateFile, opts.stateFileSrc = resolveWatchStateFile(
+				opts.stateFile,
+				viper.GetString(viperKeyWatchStateFile),
 			)
 			opts.finalBranch = strings.TrimSpace(firstNonEmpty(opts.finalBranch, viper.GetString(viperKeyFinalBranch)))
 			if !cmd.Flags().Changed("exit-after-final-ok") {
@@ -203,6 +204,7 @@ func runWatch(opts watchOptions) error {
 		"config":               opts.configPath,
 		"components_file":      cfg.Root.ComponentsFile,
 		"state_file":           opts.stateFile,
+		"state_file_source":    opts.stateFileSrc,
 		"component_scope":      normalize(strings.TrimSpace(opts.componentName)),
 		"pipeline_scope":       normalize(strings.TrimSpace(opts.pipelineName)),
 		"branch_override":      normalize(strings.TrimSpace(opts.branch)),
@@ -283,6 +285,11 @@ func runWatch(opts watchOptions) error {
 		return fmt.Errorf("save initial state: %w", err)
 	}
 	emit(eventInit, fmt.Sprintf("watching %d components", len(tracked)), logrus.Fields{"components": fmt.Sprintf("%d", len(tracked))})
+	stateFileMsg := fmt.Sprintf("state file path=%s (source=%s)", opts.stateFile, normalize(opts.stateFileSrc))
+	emit(eventStateFile, stateFileMsg, logrus.Fields{
+		"state_file":        opts.stateFile,
+		"state_file_source": normalize(opts.stateFileSrc),
+	})
 	emit(eventProbeMode, fmt.Sprintf("probe mode=%s", mode), logrus.Fields{"mode": string(mode)})
 	if scopedMode {
 		emit(eventScope, "single-component watch mode enabled (DAG ignored, final_action disabled)", nil)
