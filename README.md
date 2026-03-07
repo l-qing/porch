@@ -92,7 +92,7 @@ make build
 常用参数：
 
 - `-c, --config`：配置文件路径
-- `--state-file`：状态文件路径（默认在系统临时目录下按工作目录分隔；如需落在当前目录请显式指定 `--state-file ./.porch-state.json`）
+- `--state-file`：状态文件路径（默认每次运行都会在系统临时目录创建新的 state 文件；如需持久恢复请显式指定路径，例如 `--state-file ./.porch-state.json`）
 - `--final-branch`：覆盖 `final_action.branch`（优先级最高，可写在根命令或 watch 子命令位置）
 - `--components-file`：覆盖配置中的 `components_file` 路径（根命令参数，对所有子命令生效）
 - `--disable-final-action`：全局禁用 `final_action` 触发（根命令参数，对所有子命令生效）

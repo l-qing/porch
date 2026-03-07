@@ -617,7 +617,7 @@ watch 子命令参数：
 
 ```
 --config, -c            配置文件路径（默认: ./orchestrator.yaml）
---state-file            状态文件路径（默认: 系统临时目录下按工作目录分隔；如需当前目录请显式指定 ./.porch-state.json）
+--state-file            状态文件路径（默认: 每次运行创建新的临时 state 文件；如需持久恢复请显式指定 ./.porch-state.json）
 --component             仅监控指定组件（进入单组件模式）
 --pipeline              仅监控指定组件下的某条流水线（需配合 --component）
 --branch                覆盖 --component 对应组件的分支（需配合 --component）
@@ -668,7 +668,7 @@ porch --components-file ./components-release-1.6.yaml watch --config orchestrato
 
 ## 8. State Store 设计
 
-使用本地 JSON 文件（默认位于系统临时目录；也可通过 `--state-file` 指定为 `./.porch-state.json`），结构如下：
+使用本地 JSON 文件（默认每次运行位于新的系统临时路径；也可通过 `--state-file` 指定固定路径如 `./.porch-state.json`），结构如下：
 
 ```json
 {

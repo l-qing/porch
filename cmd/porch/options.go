@@ -3,9 +3,12 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -33,6 +36,8 @@ const (
 	viperKeyWatchStateFile     = "watch.state_file"
 	viperKeyWatchExitAfterDone = "watch.exit_after_final_ok"
 )
+
+var defaultStateRunSequence uint64
 
 type commonOptions struct {
 	configPath         string
@@ -93,16 +98,17 @@ func resolveWatchStateFile(rawFlagValue, rawViperValue string) (path, source str
 func defaultWatchStateFile() string {
 	workdir, err := os.Getwd()
 	if err != nil {
-		return filepath.Join(os.TempDir(), defaultStateDir, defaultStateFile)
+		return defaultWatchStateFileForDir("")
 	}
 	return defaultWatchStateFileForDir(workdir)
 }
 
-// defaultWatchStateFileForDir builds a stable temp state path keyed by workdir.
+// defaultWatchStateFileForDir builds a per-run temp state path.
+// It keeps workspace grouping in the parent directory while preventing stale reuse.
 func defaultWatchStateFileForDir(workdir string) string {
 	cleanWorkdir := strings.TrimSpace(workdir)
 	if cleanWorkdir == "" {
-		return filepath.Join(os.TempDir(), defaultStateDir, defaultStateFile)
+		return filepath.Join(os.TempDir(), defaultStateDir, "run-"+nextDefaultStateRunID(), defaultStateFile)
 	}
 	if abs, err := filepath.Abs(cleanWorkdir); err == nil {
 		cleanWorkdir = abs
@@ -110,5 +116,10 @@ func defaultWatchStateFileForDir(workdir string) string {
 	// Hashing keeps the path short and avoids leaking workspace names in tmp file lists.
 	sum := sha256.Sum256([]byte(filepath.Clean(cleanWorkdir)))
 	key := hex.EncodeToString(sum[:8])
-	return filepath.Join(os.TempDir(), defaultStateDir, key, defaultStateFile)
+	return filepath.Join(os.TempDir(), defaultStateDir, key, "run-"+nextDefaultStateRunID(), defaultStateFile)
+}
+
+func nextDefaultStateRunID() string {
+	seq := atomic.AddUint64(&defaultStateRunSequence, 1)
+	return fmt.Sprintf("%s-%d-%d", time.Now().UTC().Format("20060102T150405.000000000"), os.Getpid(), seq)
 }

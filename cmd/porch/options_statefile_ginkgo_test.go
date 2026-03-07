@@ -12,63 +12,50 @@ var _ = Describe("defaultWatchStateFileForDir", func() {
 	type formatCase struct {
 		description string
 		workdir     string
-		wantExact   string
+		withHash    bool
 	}
 
 	DescribeTable("builds expected path format",
 		func(tc formatCase) {
 			By(tc.description)
 			got := defaultWatchStateFileForDir(tc.workdir)
-			if tc.wantExact != "" {
-				Expect(got).To(Equal(tc.wantExact))
-				return
-			}
-
 			Expect(got).To(HavePrefix(filepath.Join(os.TempDir(), defaultStateDir) + string(filepath.Separator)))
 			Expect(got).To(HaveSuffix(string(filepath.Separator) + defaultStateFile))
-			// State file lives in temp/<dir>/<hash>/.porch-state.json.
-			Expect(filepath.Base(filepath.Dir(got))).To(HaveLen(16))
+			runDir := filepath.Base(filepath.Dir(got))
+			Expect(runDir).To(HavePrefix("run-"))
+			if tc.withHash {
+				// State file lives in temp/<dir>/<hash>/run-*/.porch-state.json.
+				hashDir := filepath.Base(filepath.Dir(filepath.Dir(got)))
+				Expect(hashDir).To(HaveLen(16))
+			}
 		},
-		Entry("falls back to global temp file when workdir is empty", formatCase{
+		Entry("uses per-run temp path when workdir is empty", formatCase{
 			description: "empty workdir",
 			workdir:     "",
-			wantExact:   filepath.Join(os.TempDir(), defaultStateDir, defaultStateFile),
+			withHash:    false,
 		}),
-		Entry("uses a hashed sub-directory for normal workspace", formatCase{
-			description: "hashed workspace path",
+		Entry("uses workspace hash + run dir for normal workspace", formatCase{
+			description: "workspace-scoped temp path",
 			workdir:     filepath.Join(os.TempDir(), "porch-workspace-a"),
+			withHash:    true,
 		}),
 	)
 
-	type stableCase struct {
+	type isolationCase struct {
 		description string
-		leftDir     string
-		rightDir    string
-		expectEqual bool
+		workdir     string
 	}
 
-	DescribeTable("is stable and workspace-specific",
-		func(tc stableCase) {
+	DescribeTable("does not reuse stale state across runs",
+		func(tc isolationCase) {
 			By(tc.description)
-			left := defaultWatchStateFileForDir(tc.leftDir)
-			right := defaultWatchStateFileForDir(tc.rightDir)
-			if tc.expectEqual {
-				Expect(left).To(Equal(right))
-				return
-			}
-			Expect(left).NotTo(Equal(right))
+			first := defaultWatchStateFileForDir(tc.workdir)
+			second := defaultWatchStateFileForDir(tc.workdir)
+			Expect(first).NotTo(Equal(second))
 		},
-		Entry("same workspace maps to same state path", stableCase{
-			description: "stable output",
-			leftDir:     filepath.Join(os.TempDir(), "porch-workspace-stable"),
-			rightDir:    filepath.Join(os.TempDir(), "porch-workspace-stable"),
-			expectEqual: true,
-		}),
-		Entry("different workspaces map to different state paths", stableCase{
-			description: "workspace isolation",
-			leftDir:     filepath.Join(os.TempDir(), "porch-workspace-left"),
-			rightDir:    filepath.Join(os.TempDir(), "porch-workspace-right"),
-			expectEqual: false,
+		Entry("same workspace gets fresh path on each invocation", isolationCase{
+			description: "fresh state per run",
+			workdir:     filepath.Join(os.TempDir(), "porch-workspace-stable"),
 		}),
 	)
 })
