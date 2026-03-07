@@ -237,4 +237,25 @@ var _ = Describe("TerminalTable", func() {
 			right: "comp-z",
 		}),
 	)
+
+	DescribeTable("orders same status/retries by elapsed desc",
+		func(tc orderCase) {
+			By(tc.description)
+			got := TerminalTable(tc.rows)
+			leftIdx := strings.Index(got, tc.left)
+			rightIdx := strings.Index(got, tc.right)
+			Expect(leftIdx).To(BeNumerically(">=", 0))
+			Expect(rightIdx).To(BeNumerically(">=", 0))
+			Expect(leftIdx).To(BeNumerically("<", rightIdx))
+		},
+		Entry("longer elapsed appears first", orderCase{
+			description: "elapsed desc",
+			rows: []Row{
+				{Component: "comp-a", Branch: "main", Pipeline: "p", Status: pipestatus.StatusRunning, Retries: 0, Elapsed: "7m5s"},
+				{Component: "comp-b", Branch: "main", Pipeline: "p", Status: pipestatus.StatusRunning, Retries: 0, Elapsed: "56m11s"},
+			},
+			left:  "comp-b",
+			right: "comp-a",
+		}),
+	)
 })

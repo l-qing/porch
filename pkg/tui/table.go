@@ -226,10 +226,28 @@ func lessDisplayRow(left, right Row) bool {
 	if left.Retries != right.Retries {
 		return left.Retries > right.Retries
 	}
+	// Within same status/retry bucket, show longer elapsed first.
+	leftElapsed := parseElapsed(left.Elapsed)
+	rightElapsed := parseElapsed(right.Elapsed)
+	if leftElapsed != rightElapsed {
+		return leftElapsed > rightElapsed
+	}
 	if left.Component != right.Component {
 		return left.Component < right.Component
 	}
 	return left.Pipeline < right.Pipeline
+}
+
+func parseElapsed(raw string) time.Duration {
+	v := strings.TrimSpace(raw)
+	if v == "" || v == "-" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 func statusSortRank(status pipestatus.Status) int {
