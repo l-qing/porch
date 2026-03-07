@@ -1777,7 +1777,9 @@ func resolveNotifyRowsPerMessage(raw int) int {
 }
 
 func notifyMarkdownInChunks(ctx context.Context, wecom *notify.Wecom, event string, rows []tui.Row, maxRows int, build func(chunk []tui.Row, page, total int) string) error {
-	chunks := chunkRowsByConstraints(rows, maxRows, maxNotifyMarkdownBytes, build)
+	// Ensure chunk boundaries keep the global display priority across parts.
+	sortedRows := tui.SortedRowsForDisplay(rows)
+	chunks := chunkRowsByConstraints(sortedRows, maxRows, maxNotifyMarkdownBytes, build)
 	total := len(chunks)
 	for i, chunk := range chunks {
 		content := build(chunk, i+1, total)

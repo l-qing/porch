@@ -54,6 +54,14 @@ var _ = Describe("MarkdownTable", func() {
 			},
 			firstDataContains: "| comp-fail |",
 		}),
+		Entry("same status should be ordered by retries desc first", testCase{
+			description: "higher retries first within same status",
+			rows: []Row{
+				{Component: "comp-low", Branch: "main", Pipeline: "p", Status: pipestatus.StatusRunning, Retries: 1},
+				{Component: "comp-high", Branch: "main", Pipeline: "p", Status: pipestatus.StatusRunning, Retries: 3},
+			},
+			firstDataContains: "| comp-high |",
+		}),
 	)
 
 	type runURLCase struct {
@@ -195,6 +203,36 @@ var _ = Describe("TerminalTable", func() {
 			},
 			left:  "comp-run",
 			right: "comp-ok",
+		}),
+	)
+
+	DescribeTable("orders same-status rows by retries and component",
+		func(tc orderCase) {
+			By(tc.description)
+			got := TerminalTable(tc.rows)
+			leftIdx := strings.Index(got, tc.left)
+			rightIdx := strings.Index(got, tc.right)
+			Expect(leftIdx).To(BeNumerically(">=", 0))
+			Expect(rightIdx).To(BeNumerically(">=", 0))
+			Expect(leftIdx).To(BeNumerically("<", rightIdx))
+		},
+		Entry("higher retries is listed first for same status", orderCase{
+			description: "retry desc",
+			rows: []Row{
+				{Component: "comp-low", Branch: "main", Pipeline: "p", Status: pipestatus.StatusRunning, Retries: 1},
+				{Component: "comp-high", Branch: "main", Pipeline: "p", Status: pipestatus.StatusRunning, Retries: 3},
+			},
+			left:  "comp-high",
+			right: "comp-low",
+		}),
+		Entry("same retries falls back to component name asc", orderCase{
+			description: "component asc",
+			rows: []Row{
+				{Component: "comp-z", Branch: "main", Pipeline: "p", Status: pipestatus.StatusRunning, Retries: 2},
+				{Component: "comp-a", Branch: "main", Pipeline: "p", Status: pipestatus.StatusRunning, Retries: 2},
+			},
+			left:  "comp-a",
+			right: "comp-z",
 		}),
 	)
 })

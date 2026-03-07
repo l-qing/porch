@@ -52,11 +52,7 @@ func (r *Renderer) Render(rows []Row) {
 // TerminalTable renders rows in the same aligned text format used by watch mode,
 // including a summary line.
 func TerminalTable(rows []Row) string {
-	sorted := make([]Row, len(rows))
-	copy(sorted, rows)
-	sort.Slice(sorted, func(i, j int) bool {
-		return lessDisplayRow(sorted[i], sorted[j])
-	})
+	sorted := SortedRowsForDisplay(rows)
 
 	headers := []string{"Component", "Branch", "Pipeline", "Status", "Retries", "Run", "RunURL"}
 	widths := []int{len(headers[0]), len(headers[1]), len(headers[2]), len(headers[3]), len(headers[4]), len(headers[5]), len(headers[6])}
@@ -159,11 +155,7 @@ func countSucceeded(rows []Row) int {
 // MarkdownTable renders rows as a summary line and a GFM-style pipe table
 // suitable for WeChat Work (企业微信) markdown_v2 webhook messages.
 func MarkdownTable(rows []Row) string {
-	sorted := make([]Row, len(rows))
-	copy(sorted, rows)
-	sort.Slice(sorted, func(i, j int) bool {
-		return lessDisplayRow(sorted[i], sorted[j])
-	})
+	sorted := SortedRowsForDisplay(rows)
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("succeeded=%d/%d\n\n", countSucceeded(sorted), len(sorted)))
@@ -197,11 +189,25 @@ func max(a, b int) int {
 	return b
 }
 
+// SortedRowsForDisplay returns a sorted copy using the shared TUI/Webhook ordering.
+func SortedRowsForDisplay(rows []Row) []Row {
+	sorted := make([]Row, len(rows))
+	copy(sorted, rows)
+	sort.Slice(sorted, func(i, j int) bool {
+		return lessDisplayRow(sorted[i], sorted[j])
+	})
+	return sorted
+}
+
 func lessDisplayRow(left, right Row) bool {
 	leftRank := statusSortRank(left.Status)
 	rightRank := statusSortRank(right.Status)
 	if leftRank != rightRank {
 		return leftRank < rightRank
+	}
+	// Higher retry count should be surfaced first within the same status band.
+	if left.Retries != right.Retries {
+		return left.Retries > right.Retries
 	}
 	if left.Component != right.Component {
 		return left.Component < right.Component
