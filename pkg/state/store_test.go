@@ -81,3 +81,34 @@ func TestSaveConcurrentNoCorruption(t *testing.T) {
 		t.Fatalf("state file looks corrupted: %q", string(b))
 	}
 }
+
+func TestSaveCreatesMissingParentDirForLockAndState(t *testing.T) {
+	base := t.TempDir()
+	path := filepath.Join(base, "nested", "state", "state.json")
+	s := NewStore(path)
+
+	st := File{
+		Version:   1,
+		StartedAt: time.Now().UTC(),
+		Components: map[string]Component{
+			"c": {
+				Branch: "main",
+				SHA:    "sha",
+				Pipelines: map[string]PipelineState{
+					"p": {Status: "watching", RetryCount: 0},
+				},
+			},
+		},
+	}
+
+	if err := s.Save(st); err != nil {
+		t.Fatalf("Save should create missing parent directories, got: %v", err)
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("state file should exist after Save: %v", err)
+	}
+	if _, err := os.Stat(path + ".lock"); err != nil {
+		t.Fatalf("lock file should exist after Save: %v", err)
+	}
+}

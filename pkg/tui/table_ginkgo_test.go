@@ -47,12 +47,12 @@ var _ = Describe("MarkdownTable", func() {
 			firstDataContains: "| comp-run |",
 		}),
 		Entry("watching row should also be treated as in-progress", testCase{
-			description: "watching status is shown before non-running rows",
+			description: "failure rows are prioritized before running rows",
 			rows: []Row{
 				{Component: "comp-fail", Branch: "main", Pipeline: "p", Status: pipestatus.StatusFailed},
 				{Component: "comp-watch", Branch: "main", Pipeline: "p", Status: pipestatus.StatusWatching},
 			},
-			firstDataContains: "| comp-watch |",
+			firstDataContains: "| comp-fail |",
 		}),
 	)
 
@@ -158,6 +158,43 @@ var _ = Describe("TerminalTable", func() {
 				"tt-all-in-one-qgsbn",
 				"-",
 			},
+		}),
+	)
+
+	type orderCase struct {
+		description string
+		rows        []Row
+		left        string
+		right       string
+	}
+
+	DescribeTable("prioritizes non-ok rows",
+		func(tc orderCase) {
+			By(tc.description)
+			got := TerminalTable(tc.rows)
+			leftIdx := strings.Index(got, tc.left)
+			rightIdx := strings.Index(got, tc.right)
+			Expect(leftIdx).To(BeNumerically(">=", 0))
+			Expect(rightIdx).To(BeNumerically(">=", 0))
+			Expect(leftIdx).To(BeNumerically("<", rightIdx))
+		},
+		Entry("failed row appears before succeeded row", orderCase{
+			description: "non-ok first",
+			rows: []Row{
+				{Component: "comp-ok", Branch: "main", Pipeline: "p", Status: pipestatus.StatusSucceeded},
+				{Component: "comp-fail", Branch: "main", Pipeline: "p", Status: pipestatus.StatusFailed},
+			},
+			left:  "comp-fail",
+			right: "comp-ok",
+		}),
+		Entry("running row appears before succeeded row", orderCase{
+			description: "running is still non-ok",
+			rows: []Row{
+				{Component: "comp-ok", Branch: "main", Pipeline: "p", Status: pipestatus.StatusSucceeded},
+				{Component: "comp-run", Branch: "main", Pipeline: "p", Status: pipestatus.StatusRunning},
+			},
+			left:  "comp-run",
+			right: "comp-ok",
 		}),
 	)
 })

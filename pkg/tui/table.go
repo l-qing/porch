@@ -55,10 +55,7 @@ func TerminalTable(rows []Row) string {
 	sorted := make([]Row, len(rows))
 	copy(sorted, rows)
 	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Component == sorted[j].Component {
-			return sorted[i].Pipeline < sorted[j].Pipeline
-		}
-		return sorted[i].Component < sorted[j].Component
+		return lessDisplayRow(sorted[i], sorted[j])
 	})
 
 	headers := []string{"Component", "Branch", "Pipeline", "Status", "Retries", "Run", "RunURL"}
@@ -165,15 +162,7 @@ func MarkdownTable(rows []Row) string {
 	sorted := make([]Row, len(rows))
 	copy(sorted, rows)
 	sort.Slice(sorted, func(i, j int) bool {
-		leftInProgress := isInProgressStatus(sorted[i].Status)
-		rightInProgress := isInProgressStatus(sorted[j].Status)
-		if leftInProgress != rightInProgress {
-			return leftInProgress
-		}
-		if sorted[i].Component == sorted[j].Component {
-			return sorted[i].Pipeline < sorted[j].Pipeline
-		}
-		return sorted[i].Component < sorted[j].Component
+		return lessDisplayRow(sorted[i], sorted[j])
 	})
 
 	var sb strings.Builder
@@ -208,6 +197,33 @@ func max(a, b int) int {
 	return b
 }
 
-func isInProgressStatus(status pipestatus.Status) bool {
-	return status == pipestatus.StatusRunning || status == pipestatus.StatusWatching
+func lessDisplayRow(left, right Row) bool {
+	leftRank := statusSortRank(left.Status)
+	rightRank := statusSortRank(right.Status)
+	if leftRank != rightRank {
+		return leftRank < rightRank
+	}
+	if left.Component != right.Component {
+		return left.Component < right.Component
+	}
+	return left.Pipeline < right.Pipeline
+}
+
+func statusSortRank(status pipestatus.Status) int {
+	switch status {
+	case pipestatus.StatusFailed, pipestatus.StatusExhausted, pipestatus.StatusTimeout, pipestatus.StatusQueryErr:
+		return 0
+	case pipestatus.StatusBackoff, pipestatus.StatusSettling, pipestatus.StatusBlocked:
+		return 1
+	case pipestatus.StatusPending:
+		return 2
+	case pipestatus.StatusRunning, pipestatus.StatusWatching:
+		return 3
+	case pipestatus.StatusMissing, pipestatus.StatusUnknown:
+		return 4
+	case pipestatus.StatusSucceeded:
+		return 9
+	default:
+		return 5
+	}
 }
