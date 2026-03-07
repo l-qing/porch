@@ -16,6 +16,7 @@ type Row struct {
 	Pipeline  string
 	Status    pipestatus.Status
 	Retries   int
+	Elapsed   string
 	Run       string
 	RunURL    string
 	CommitURL string
@@ -54,8 +55,8 @@ func (r *Renderer) Render(rows []Row) {
 func TerminalTable(rows []Row) string {
 	sorted := SortedRowsForDisplay(rows)
 
-	headers := []string{"Component", "Branch", "Pipeline", "Status", "Retries", "Run", "RunURL"}
-	widths := []int{len(headers[0]), len(headers[1]), len(headers[2]), len(headers[3]), len(headers[4]), len(headers[5]), len(headers[6])}
+	headers := []string{"Component", "Branch", "Pipeline", "Status", "Retries", "Elapsed", "Run", "RunURL"}
+	widths := []int{len(headers[0]), len(headers[1]), len(headers[2]), len(headers[3]), len(headers[4]), len(headers[5]), len(headers[6]), len(headers[7])}
 
 	for _, row := range sorted {
 		status := renderStatus(row.Status)
@@ -68,18 +69,23 @@ func TerminalTable(rows []Row) string {
 			runURL = "-"
 		}
 		retries := strconv.Itoa(row.Retries)
+		elapsed := strings.TrimSpace(row.Elapsed)
+		if elapsed == "" {
+			elapsed = "-"
+		}
 
 		widths[0] = max(widths[0], len(row.Component))
 		widths[1] = max(widths[1], len(row.Branch))
 		widths[2] = max(widths[2], len(row.Pipeline))
 		widths[3] = max(widths[3], len(status))
 		widths[4] = max(widths[4], len(retries))
-		widths[5] = max(widths[5], len(run))
-		widths[6] = max(widths[6], len(runURL))
+		widths[5] = max(widths[5], len(elapsed))
+		widths[6] = max(widths[6], len(run))
+		widths[7] = max(widths[7], len(runURL))
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s\n",
+	sb.WriteString(fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s\n",
 		widths[0], headers[0],
 		widths[1], headers[1],
 		widths[2], headers[2],
@@ -87,8 +93,9 @@ func TerminalTable(rows []Row) string {
 		widths[4], headers[4],
 		widths[5], headers[5],
 		widths[6], headers[6],
+		widths[7], headers[7],
 	))
-	sb.WriteString(fmt.Sprintf("%s  %s  %s  %s  %s  %s  %s\n",
+	sb.WriteString(fmt.Sprintf("%s  %s  %s  %s  %s  %s  %s  %s\n",
 		strings.Repeat("-", widths[0]),
 		strings.Repeat("-", widths[1]),
 		strings.Repeat("-", widths[2]),
@@ -96,6 +103,7 @@ func TerminalTable(rows []Row) string {
 		strings.Repeat("-", widths[4]),
 		strings.Repeat("-", widths[5]),
 		strings.Repeat("-", widths[6]),
+		strings.Repeat("-", widths[7]),
 	))
 	sb.WriteString(fmt.Sprintf("Summary: succeeded=%d/%d\n\n", countSucceeded(sorted), len(sorted)))
 
@@ -108,14 +116,19 @@ func TerminalTable(rows []Row) string {
 		if runURL == "" {
 			runURL = "-"
 		}
-		sb.WriteString(fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %*d  %-*s  %-*s\n",
+		elapsed := strings.TrimSpace(row.Elapsed)
+		if elapsed == "" {
+			elapsed = "-"
+		}
+		sb.WriteString(fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %*d  %-*s  %-*s  %-*s\n",
 			widths[0], row.Component,
 			widths[1], row.Branch,
 			widths[2], row.Pipeline,
 			widths[3], renderStatus(row.Status),
 			widths[4], row.Retries,
-			widths[5], run,
-			widths[6], runURL,
+			widths[5], elapsed,
+			widths[6], run,
+			widths[7], runURL,
 		))
 	}
 	return sb.String()
@@ -160,8 +173,8 @@ func MarkdownTable(rows []Row) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("succeeded=%d/%d\n\n", countSucceeded(sorted), len(sorted)))
 
-	sb.WriteString("| Component | Branch | Pipeline | Status | Retries |\n")
-	sb.WriteString("| :--- | :--- | :--- | :---: | :---: |\n")
+	sb.WriteString("| Component | Branch | Pipeline | Status | Retries | Elapsed |\n")
+	sb.WriteString("| :--- | :--- | :--- | :---: | :---: | :--- |\n")
 	for _, r := range sorted {
 		component := r.Component
 		if r.CommitURL != "" {
@@ -175,9 +188,13 @@ func MarkdownTable(rows []Row) string {
 		if runURL := strings.TrimSpace(r.RunURL); runURL != "" {
 			pipeline = fmt.Sprintf("[%s](%s)", r.Pipeline, runURL)
 		}
-		sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %d |\n",
+		elapsed := strings.TrimSpace(r.Elapsed)
+		if elapsed == "" {
+			elapsed = "-"
+		}
+		sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %d | %s |\n",
 			component, branch, pipeline,
-			renderStatus(r.Status), r.Retries))
+			renderStatus(r.Status), r.Retries, elapsed))
 	}
 	return sb.String()
 }

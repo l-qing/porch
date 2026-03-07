@@ -17,9 +17,12 @@ import (
 )
 
 type ProbeResult struct {
-	Status     pipestatus.Status
-	Reason     string
-	Conclusion pipestatus.Conclusion
+	Status           pipestatus.Status
+	Reason           string
+	Conclusion       pipestatus.Conclusion
+	StartedAt        *time.Time
+	CompletedAt      *time.Time
+	LastTransitionAt *time.Time
 }
 
 func ProbePipelineRun(ctx context.Context, namespace, name, kubeconfig, kubeContext string) (ProbeResult, error) {
@@ -91,10 +94,13 @@ func ProbePipelineRun(ctx context.Context, namespace, name, kubeconfig, kubeCont
 
 	payload := struct {
 		Status struct {
-			Conditions []struct {
-				Type   string `json:"type"`
-				Status string `json:"status"`
-				Reason string `json:"reason"`
+			StartTime      string `json:"startTime"`
+			CompletionTime string `json:"completionTime"`
+			Conditions     []struct {
+				Type               string `json:"type"`
+				Status             string `json:"status"`
+				Reason             string `json:"reason"`
+				LastTransitionTime string `json:"lastTransitionTime"`
 			} `json:"conditions"`
 		} `json:"status"`
 	}{}
@@ -102,22 +108,53 @@ func ProbePipelineRun(ctx context.Context, namespace, name, kubeconfig, kubeCont
 		return ProbeResult{}, fmt.Errorf("decode pipelinerun json: %w", err)
 	}
 
+	startedAt := parseRFC3339Ptr(payload.Status.StartTime)
+	completedAt := parseRFC3339Ptr(payload.Status.CompletionTime)
+
 	// Tekton pipeline terminal state is represented in the Succeeded condition.
 	for _, c := range payload.Status.Conditions {
 		if c.Type != "Succeeded" {
 			continue
 		}
+		lastTransitionAt := parseRFC3339Ptr(c.LastTransitionTime)
 		switch c.Status {
 		case "True":
-			return ProbeResult{Status: pipestatus.StatusSucceeded, Reason: c.Reason, Conclusion: pipestatus.ConclusionSuccess}, nil
+			return ProbeResult{
+				Status:           pipestatus.StatusSucceeded,
+				Reason:           c.Reason,
+				Conclusion:       pipestatus.ConclusionSuccess,
+				StartedAt:        startedAt,
+				CompletedAt:      firstNonNilTime(completedAt, lastTransitionAt),
+				LastTransitionAt: lastTransitionAt,
+			}, nil
 		case "False":
-			return ProbeResult{Status: pipestatus.StatusFailed, Reason: c.Reason, Conclusion: pipestatus.ConclusionFailure}, nil
+			return ProbeResult{
+				Status:           pipestatus.StatusFailed,
+				Reason:           c.Reason,
+				Conclusion:       pipestatus.ConclusionFailure,
+				StartedAt:        startedAt,
+				CompletedAt:      firstNonNilTime(completedAt, lastTransitionAt),
+				LastTransitionAt: lastTransitionAt,
+			}, nil
 		default:
-			return ProbeResult{Status: pipestatus.StatusRunning, Reason: c.Reason, Conclusion: pipestatus.ConclusionUnknown}, nil
+			return ProbeResult{
+				Status:           pipestatus.StatusRunning,
+				Reason:           c.Reason,
+				Conclusion:       pipestatus.ConclusionUnknown,
+				StartedAt:        startedAt,
+				CompletedAt:      completedAt,
+				LastTransitionAt: lastTransitionAt,
+			}, nil
 		}
 	}
 
-	return ProbeResult{Status: pipestatus.StatusUnknown, Conclusion: pipestatus.ConclusionUnknown}, nil
+	return ProbeResult{
+		Status:           pipestatus.StatusUnknown,
+		Conclusion:       pipestatus.ConclusionUnknown,
+		StartedAt:        startedAt,
+		CompletedAt:      completedAt,
+		LastTransitionAt: nil,
+	}, nil
 }
 
 func summarize(s string, n int) string {
@@ -160,4 +197,25 @@ func maskKubectlArgs(args []string) []string {
 		out = append(out, a)
 	}
 	return out
+}
+
+func parseRFC3339Ptr(raw string) *time.Time {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, v)
+	if err != nil {
+		return nil
+	}
+	return &parsed
+}
+
+func firstNonNilTime(values ...*time.Time) *time.Time {
+	for _, v := range values {
+		if v != nil {
+			return v
+		}
+	}
+	return nil
 }

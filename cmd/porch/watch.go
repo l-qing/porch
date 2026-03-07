@@ -29,18 +29,20 @@ import (
 )
 
 type trackedPipeline struct {
-	Name        string
-	RetryCmd    string
-	Namespace   string
-	PipelineRun string
-	Status      pipestatus.Status
-	Conclusion  pipestatus.Conclusion
-	RetryCount  int
-	QueryErrors int
-	RunMismatch int
-	CompletedAt *time.Time
-	RetryAfter  *time.Time
-	SettleAfter *time.Time
+	Name             string
+	RetryCmd         string
+	Namespace        string
+	PipelineRun      string
+	Status           pipestatus.Status
+	Conclusion       pipestatus.Conclusion
+	StartedAt        *time.Time
+	LastTransitionAt *time.Time
+	RetryCount       int
+	QueryErrors      int
+	RunMismatch      int
+	CompletedAt      *time.Time
+	RetryAfter       *time.Time
+	SettleAfter      *time.Time
 }
 
 type trackedComponent struct {
@@ -898,6 +900,9 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 					p.RetryCount++
 					p.Status = pipestatus.StatusWatching
 					p.Conclusion = pipestatus.ConclusionUnknown
+					p.StartedAt = nil
+					p.CompletedAt = nil
+					p.LastTransitionAt = nil
 					p.SettleAfter = nil
 					emit(eventRetryOK, fmt.Sprintf("%s/%s new_run=%s", c.Name, p.Name, run), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "attempt": fmt.Sprintf("%d", p.RetryCount), "reason": "rediscovered"})
 				}
@@ -1048,6 +1053,17 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 			if isStopping() {
 				return errWatchStopRequested
 			}
+			if probeErr == nil {
+				if res.StartedAt != nil {
+					p.StartedAt = cloneTimePtr(res.StartedAt)
+				}
+				if res.LastTransitionAt != nil {
+					p.LastTransitionAt = cloneTimePtr(res.LastTransitionAt)
+				}
+				if res.CompletedAt != nil {
+					p.CompletedAt = cloneTimePtr(res.CompletedAt)
+				}
+			}
 			p.QueryErrors = nextErrs
 			if status == pipestatus.StatusRunning && res.Reason == "gh_fallback_run_mismatch" {
 				p.RunMismatch++
@@ -1077,8 +1093,10 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 			switch status {
 			case pipestatus.StatusSucceeded:
 				if p.Status != pipestatus.StatusSucceeded {
-					now := time.Now().UTC()
-					p.CompletedAt = &now
+					if p.CompletedAt == nil {
+						now := time.Now().UTC()
+						p.CompletedAt = &now
+					}
 					if sha, err := refreshRuntimeSHA(ctx, ghc, c); err == nil {
 						c.SHA = sha
 					}
@@ -1089,6 +1107,7 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 
 			case pipestatus.StatusRunning, pipestatus.StatusWatching:
 				p.Status = status
+				p.CompletedAt = nil
 				if probeErr != nil {
 					emit(eventQueryWarn, fmt.Sprintf("%s/%s query failed (%d): %v", c.Name, p.Name, p.QueryErrors, probeErr), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "error": probeErr.Error()})
 				}
@@ -1107,6 +1126,9 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 					continue
 				}
 				p.Status = pipestatus.StatusFailed
+				if p.CompletedAt == nil && p.LastTransitionAt != nil {
+					p.CompletedAt = cloneTimePtr(p.LastTransitionAt)
+				}
 				emit(eventFailed, fmt.Sprintf("%s/%s failed, retry_count=%d", c.Name, p.Name, p.RetryCount), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "reason": "query_error_threshold"})
 
 				attempt := p.RetryCount + 1
@@ -1142,6 +1164,9 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 					continue
 				}
 				p.Status = pipestatus.StatusFailed
+				if p.CompletedAt == nil && p.LastTransitionAt != nil {
+					p.CompletedAt = cloneTimePtr(p.LastTransitionAt)
+				}
 				emit(eventFailed, fmt.Sprintf("%s/%s failed, retry_count=%d", c.Name, p.Name, p.RetryCount), logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": c.SHA, "reason": res.Reason})
 
 				attempt := p.RetryCount + 1
@@ -1393,6 +1418,7 @@ func firstNamespace(pipelines map[string]*trackedPipeline) string {
 
 func toRows(tracked map[string]*trackedComponent, conn config.Connection) []tui.Row {
 	org := conn.GitHubOrg
+	now := time.Now().UTC()
 	rows := []tui.Row{}
 	for _, c := range tracked {
 		for _, p := range c.Pipelines {
@@ -1402,6 +1428,7 @@ func toRows(tracked map[string]*trackedComponent, conn config.Connection) []tui.
 				Pipeline:  p.Name,
 				Status:    p.Status,
 				Retries:   p.RetryCount,
+				Elapsed:   pipelineElapsedText(p.StartedAt, p.CompletedAt, p.LastTransitionAt, p.Status, now),
 				Run:       normalize(p.PipelineRun),
 				RunURL:    pipelineRunDetailURL(p.Namespace, p.PipelineRun, conn),
 				CommitURL: commitChecksURL(org, c.Repo, c.SHA),
@@ -1670,6 +1697,9 @@ func triggerRetry(
 	p.SettleAfter = &settleAfter
 	p.RetryAfter = nil
 	p.Status = pipestatus.StatusSettling
+	p.StartedAt = nil
+	p.CompletedAt = nil
+	p.LastTransitionAt = nil
 	return nil
 }
 

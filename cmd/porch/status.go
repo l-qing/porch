@@ -82,11 +82,17 @@ func printStatusTable(ctx context.Context, log *logrus.Logger, ghc *gh.Client, m
 	kubeconfig := conn.Kubeconfig
 	kubeContext := conn.Context
 	rows := make([]tui.Row, 0, len(components))
+	now := time.Now().UTC()
 	for _, c := range components {
 		for _, p := range c.Pipelines {
 			// Snapshot from initialization is the baseline; live probes can override it.
 			fallback := watcher.ProbeFromCheckRun(p.Status, p.Conclusion)
 			st := fallback.Status
+			var (
+				startedAt        *time.Time
+				completedAt      *time.Time
+				lastTransitionAt *time.Time
+			)
 			if !useKubectlProbe(mode) {
 				if ghc != nil {
 					if ghProbe, _, ghErr := fallbackProbeStatusFromGH(ctx, ghc, c, p.Name, p.PipelineRun); ghErr == nil {
@@ -109,6 +115,9 @@ func printStatusTable(ctx context.Context, log *logrus.Logger, ghc *gh.Client, m
 				cancel()
 				if err == nil {
 					st = pr.Status
+					startedAt = cloneTimePtr(pr.StartedAt)
+					completedAt = cloneTimePtr(pr.CompletedAt)
+					lastTransitionAt = cloneTimePtr(pr.LastTransitionAt)
 				} else {
 					source := "gh_snapshot"
 					if ghc != nil {
@@ -138,6 +147,7 @@ func printStatusTable(ctx context.Context, log *logrus.Logger, ghc *gh.Client, m
 				Pipeline:  p.Name,
 				Status:    st,
 				Retries:   0,
+				Elapsed:   pipelineElapsedText(startedAt, completedAt, lastTransitionAt, st, now),
 				Run:       normalize(p.PipelineRun),
 				RunURL:    pipelineRunDetailURL(p.Namespace, p.PipelineRun, conn),
 			})

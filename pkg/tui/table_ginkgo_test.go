@@ -92,7 +92,7 @@ var _ = Describe("MarkdownTable", func() {
 				},
 			},
 			wantSubstrings: []string{
-				"| Component | Branch | Pipeline | Status | Retries |",
+				"| Component | Branch | Pipeline | Status | Retries | Elapsed |",
 				"[p](https://edge.alauda.cn/console-pipeline-v2/workspace/devops~business-build~devops/pipeline/pipelineRuns/detail/tt-all-in-one-qgsbn)",
 			},
 		}),
@@ -109,7 +109,7 @@ var _ = Describe("MarkdownTable", func() {
 				},
 			},
 			wantSubstrings: []string{
-				"| comp | main | p | OK | 0 |",
+				"| comp | main | p | OK | 0 | - |",
 			},
 		}),
 	)
@@ -144,6 +144,7 @@ var _ = Describe("TerminalTable", func() {
 				},
 			},
 			wantSubstrings: []string{
+				"Elapsed",
 				"RunURL",
 				"tt-all-in-one-qgsbn",
 				"https://edge.alauda.cn/console-pipeline-v2/workspace/devops~business-build~devops/pipeline/pipelineRuns/detail/tt-all-in-one-qgsbn",
@@ -162,6 +163,7 @@ var _ = Describe("TerminalTable", func() {
 				},
 			},
 			wantSubstrings: []string{
+				"Elapsed",
 				"RunURL",
 				"tt-all-in-one-qgsbn",
 				"-",
