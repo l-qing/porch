@@ -56,6 +56,7 @@ func ProbePipelineRun(ctx context.Context, namespace, name, kubeconfig, kubeCont
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
+		stderrMsg := strings.TrimSpace(stderr.String())
 		fields := logrus.Fields{
 			"tool":      "kubectl",
 			"namespace": namespace,
@@ -71,10 +72,15 @@ func ProbePipelineRun(ctx context.Context, namespace, name, kubeconfig, kubeCont
 			"elapsed": time.Since(start).Truncate(time.Millisecond).String(),
 			"error":   err.Error(),
 		}
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			fields["stderr"] = summarize(msg, 240)
+		if stderrMsg != "" {
+			fields["stderr"] = summarize(stderrMsg, 240)
 		}
 		logrus.WithFields(fields).Debug("external command failed")
+		if stderrMsg != "" {
+			// Preserve kubectl stderr so callers can distinguish resource-missing
+			// errors from transient transport failures.
+			return ProbeResult{}, fmt.Errorf("%w: %s", err, summarize(stderrMsg, 240))
+		}
 		return ProbeResult{}, err
 	}
 	logrus.WithFields(logrus.Fields{

@@ -118,6 +118,11 @@ const recoverProbeTimeout = 10 * time.Second
 const ghAnnotationTimeout = 8 * time.Second
 const chunkEstimatePage = 99
 
+const (
+	ghFallbackReasonRunMismatch   = "gh_fallback_run_mismatch"
+	ghFallbackReasonRuntimeMissed = "gh_fallback_runtime_missing"
+)
+
 var errWatchStopRequested = errors.New("watch stop requested")
 
 func newWatchCmd() *cobra.Command {
@@ -984,6 +989,7 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 				// Only retry GH fallback here for real kubectl probe failures.
 				// Missing run/namespace has already been handled in the block above.
 				if probeErr != nil && strings.TrimSpace(p.Namespace) != "" && strings.TrimSpace(p.PipelineRun) != "" {
+					kubectlProbeErr := probeErr
 					log.WithFields(logrus.Fields{
 						"component": c.Name,
 						"pipeline":  p.Name,
@@ -995,6 +1001,12 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 					if err == nil {
 						res = fallback
 						probeErr = nil
+						// If the tracked PipelineRun disappears from cluster while GH still reports
+						// a non-terminal check-run, keep retrying with a bounded threshold.
+						if isPipelineRunNotFoundError(kubectlProbeErr) &&
+							(fallback.Status == pipestatus.StatusRunning || fallback.Status == pipestatus.StatusWatching) {
+							res.Reason = ghFallbackReasonRuntimeMissed
+						}
 						checksURL := commitChecksURL(cfg.Root.Connection.GitHubOrg, c.Repo, c.SHA)
 						emit(eventGHFallback, ghFallbackEventMessage(cfg.Root.Connection.GitHubOrg, c.Repo, c.SHA), logrus.Fields{
 							"component": c.Name,
@@ -1070,25 +1082,30 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 				}
 			}
 			p.QueryErrors = nextErrs
-			if status == pipestatus.StatusRunning && res.Reason == "gh_fallback_run_mismatch" {
+			if status == pipestatus.StatusRunning &&
+				(res.Reason == ghFallbackReasonRunMismatch || res.Reason == ghFallbackReasonRuntimeMissed) {
 				p.RunMismatch++
-				emit(eventRunMismatch, fmt.Sprintf("%s/%s run mismatch (%d/%d), current_run=%s", c.Name, p.Name, p.RunMismatch, runMismatchRetryThreshold, p.PipelineRun), logrus.Fields{
+				staleKind := "run mismatch"
+				if res.Reason == ghFallbackReasonRuntimeMissed {
+					staleKind = "runtime missing"
+				}
+				emit(eventRunMismatch, fmt.Sprintf("%s/%s %s (%d/%d), current_run=%s", c.Name, p.Name, staleKind, p.RunMismatch, runMismatchRetryThreshold, p.PipelineRun), logrus.Fields{
 					"component": c.Name,
 					"branch":    c.Branch,
 					"pipeline":  p.Name,
 					"run":       p.PipelineRun,
-					"reason":    "gh_fallback_run_mismatch",
+					"reason":    res.Reason,
 				})
 				if p.RunMismatch >= runMismatchRetryThreshold {
 					status = pipestatus.StatusFailed
-					res.Reason = "gh_fallback_run_mismatch"
+					thresholdReason := res.Reason
 					p.RunMismatch = 0
-					emit(eventRunStale, fmt.Sprintf("%s/%s run mismatch persisted, force retry", c.Name, p.Name), logrus.Fields{
+					emit(eventRunStale, fmt.Sprintf("%s/%s %s persisted, force retry", c.Name, p.Name, staleKind), logrus.Fields{
 						"component": c.Name,
 						"branch":    c.Branch,
 						"pipeline":  p.Name,
 						"run":       p.PipelineRun,
-						"reason":    "gh_fallback_run_mismatch_threshold",
+						"reason":    thresholdReason + "_threshold",
 					})
 				}
 			} else {
@@ -1655,6 +1672,14 @@ func ghFallbackEventMessage(org, repo, sha string) string {
 	return fmt.Sprintf("%s: %s", base, checksURL)
 }
 
+func isPipelineRunNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "notfound") || strings.Contains(msg, "not found")
+}
+
 func fallbackProbeFromGH(ctx context.Context, ghc *gh.Client, c *trackedComponent, pipeline, currentRun string) (watcher.ProbeResult, string, error) {
 	lookup := func(sha string) (watcher.ProbeResult, error) {
 		probeWithAnnotations := func(r gh.CheckRun) watcher.ProbeResult {
@@ -1692,7 +1717,7 @@ func fallbackProbeFromGH(ctx context.Context, ghc *gh.Client, c *trackedComponen
 				if inferred.Status == pipestatus.StatusFailed {
 					return inferred, nil
 				}
-				return watcher.ProbeResult{Status: pipestatus.StatusRunning, Reason: "gh_fallback_run_mismatch", Conclusion: pipestatus.ConclusionUnknown}, nil
+				return watcher.ProbeResult{Status: pipestatus.StatusRunning, Reason: ghFallbackReasonRunMismatch, Conclusion: pipestatus.ConclusionUnknown}, nil
 			}
 			return watcher.ProbeResult{}, fmt.Errorf("pipeline %q not found in GH check-runs", pipeline)
 		}
