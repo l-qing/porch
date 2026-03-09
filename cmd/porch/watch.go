@@ -94,6 +94,7 @@ const (
 	eventDryRetry       watchEventKind = "DRY_RETRY"
 	eventRetryOK        watchEventKind = "RETRY_OK"
 	eventGHFallback     watchEventKind = "GH_FALLBACK"
+	eventHeadUpdate     watchEventKind = "HEAD_UPDATE"
 	eventRunMismatch    watchEventKind = "RUN_MISMATCH"
 	eventRunStale       watchEventKind = "RUN_STALE"
 	eventSuccess        watchEventKind = "SUCCESS"
@@ -846,6 +847,10 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 		return false
 	}
 
+	if err := syncSucceededComponentsToLatestHead(ctx, tracked, ghc, cfg.Root.Connection.GitHubOrg, log, emit, isStopping); err != nil {
+		return err
+	}
+
 	succeeded := succeededMap(tracked)
 	log.WithFields(logrus.Fields{
 		"components": fmt.Sprintf("%d", len(tracked)),
@@ -1194,6 +1199,140 @@ func watchOnce(ctx context.Context, tracked map[string]*trackedComponent, deps w
 		}
 	}
 	return nil
+}
+
+func syncSucceededComponentsToLatestHead(
+	ctx context.Context,
+	tracked map[string]*trackedComponent,
+	ghc *gh.Client,
+	org string,
+	log *logrus.Logger,
+	emit func(kind watchEventKind, msg string, fields logrus.Fields),
+	shouldStop func() bool,
+) error {
+	names := make([]string, 0, len(tracked))
+	for name := range tracked {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		if shouldStop != nil && shouldStop() {
+			return errWatchStopRequested
+		}
+		c := tracked[name]
+		if c == nil || !componentPipelinesAllSucceeded(c) {
+			continue
+		}
+
+		oldSHA := strings.TrimSpace(c.SHA)
+		oldBranch := strings.TrimSpace(c.Branch)
+		changed, err := refreshComponentTrackingOnHeadChange(ctx, ghc, c)
+		if err != nil {
+			log.WithFields(logrus.Fields{
+				"component": c.Name,
+				"branch":    normalize(c.Branch),
+				"sha":       normalize(c.SHA),
+				"error":     err.Error(),
+			}).Debug("failed to sync component head")
+		}
+		if !changed {
+			continue
+		}
+
+		checksURL := commitChecksURL(org, c.Repo, c.SHA)
+		msg := fmt.Sprintf("%s branch head changed %s -> %s", c.Name, shortSHA(oldSHA), shortSHA(c.SHA))
+		if checksURL != "" {
+			msg = fmt.Sprintf("%s: %s", msg, checksURL)
+		}
+		emit(eventHeadUpdate, msg, logrus.Fields{
+			"component":  c.Name,
+			"repo":       c.Repo,
+			"old_branch": normalize(oldBranch),
+			"branch":     normalize(c.Branch),
+			"old_sha":    normalize(oldSHA),
+			"sha":        normalize(c.SHA),
+			"checks":     checksURL,
+		})
+	}
+
+	return nil
+}
+
+func componentPipelinesAllSucceeded(c *trackedComponent) bool {
+	if c == nil || len(c.Pipelines) == 0 {
+		return false
+	}
+	for _, p := range c.Pipelines {
+		if p == nil || p.Status != pipestatus.StatusSucceeded {
+			return false
+		}
+	}
+	return true
+}
+
+func refreshComponentTrackingOnHeadChange(ctx context.Context, ghc *gh.Client, c *trackedComponent) (bool, error) {
+	if c == nil || ghc == nil {
+		return false, nil
+	}
+
+	oldSHA := strings.TrimSpace(c.SHA)
+	sha, err := refreshRuntimeSHA(ctx, ghc, c)
+	if err != nil {
+		return false, err
+	}
+	sha = strings.TrimSpace(sha)
+	if sha == "" || sha == oldSHA {
+		return false, nil
+	}
+
+	// Head moved: drop stale run state and rebuild tracking from check-runs of new SHA.
+	runs, err := ghc.CheckRuns(ctx, c.Repo, sha)
+	applyComponentHeadSnapshot(c, nil)
+	if err != nil {
+		return true, fmt.Errorf("query check-runs for new head %s: %w", shortSHA(sha), err)
+	}
+	applyComponentHeadSnapshot(c, runs)
+	return true, nil
+}
+
+func applyComponentHeadSnapshot(c *trackedComponent, runs []gh.CheckRun) {
+	if c == nil {
+		return
+	}
+	for _, p := range c.Pipelines {
+		if p == nil {
+			continue
+		}
+
+		p.RetryCount = 0
+		p.QueryErrors = 0
+		p.RunMismatch = 0
+		p.RetryAfter = nil
+		p.SettleAfter = nil
+		p.StartedAt = nil
+		p.CompletedAt = nil
+		p.LastTransitionAt = nil
+		p.Namespace = ""
+		p.PipelineRun = ""
+		p.Conclusion = pipestatus.ConclusionUnknown
+		p.Status = pipestatus.StatusWatching
+
+		r, ok := component.FindPipelineCheckRun(runs, p.Name)
+		if !ok {
+			continue
+		}
+		probe := watcher.ProbeFromCheckRun(r.Status, r.Conclusion)
+		p.Status = probe.Status
+		p.Conclusion = probe.Conclusion
+
+		namespace, run, _ := component.ParseDetailsURLForPipeline(r.DetailsURL, p.Name)
+		if strings.TrimSpace(run) == "" {
+			run = component.PipelineRunFromCheckRun(r, p.Name)
+		}
+		p.Namespace = strings.TrimSpace(namespace)
+		p.PipelineRun = strings.TrimSpace(run)
+	}
 }
 
 func toTracked(cfg config.RuntimeConfig, rs []component.RuntimeComponent) (map[string]*trackedComponent, error) {
