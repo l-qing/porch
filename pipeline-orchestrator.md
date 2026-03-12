@@ -165,7 +165,7 @@ components:
     branch_patterns: []              # 可选；Go 正则，启动时匹配仓库分支并冻结
     pipelines:                       # 需要监控的流水线列表
       - name: tp-all-in-one          # PipelineRun 的 original-prname
-        retry_command: "/test tp-all-in-one branch:{branch}"
+        retry_command: "/test tp-all-in-one branch:{branch}" # 可选，默认值为 "/test <pipeline> branch:{branch}"
 
   - name: hubs-wrapper
     repo: tektoncd-hubs-api

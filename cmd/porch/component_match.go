@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 
 	"porch/pkg/config"
@@ -44,7 +43,7 @@ func buildAdHocComponent(repo, pipeline, branch string) config.LoadedComponent {
 		Branch: effectiveBranch,
 		Pipelines: []config.PipelineSpec{{
 			Name:         pipeline,
-			RetryCommand: fmt.Sprintf("/test %s branch:{branch}", pipeline),
+			RetryCommand: config.DefaultRetryCommand(pipeline),
 		}},
 	}
 }

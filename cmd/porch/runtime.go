@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"porch/pkg/config"
 
@@ -14,7 +16,74 @@ import (
 func loadRuntimeConfig(opts commonOptions) (config.RuntimeConfig, error) {
 	return config.LoadWithOptions(opts.configPath, config.LoadOptions{
 		ComponentsFileOverride: opts.componentsFile,
+		GitHubOrgOverride:      opts.githubOrg,
 	})
+}
+
+func loadRuntimeConfigForWatch(opts watchOptions) (config.RuntimeConfig, error) {
+	cfg, err := loadRuntimeConfig(opts.commonOptions)
+	if err == nil {
+		return cfg, nil
+	}
+	if !shouldUseWatchMinimalConfig(opts, err) {
+		return cfg, err
+	}
+	return buildWatchMinimalRuntimeConfig(opts), nil
+}
+
+func shouldUseWatchMinimalConfig(opts watchOptions, loadErr error) bool {
+	if !errors.Is(loadErr, os.ErrNotExist) {
+		return false
+	}
+	if strings.TrimSpace(opts.githubOrg) == "" {
+		return false
+	}
+	if strings.TrimSpace(opts.componentName) == "" {
+		return false
+	}
+	if strings.TrimSpace(opts.pipelineName) == "" {
+		return false
+	}
+	return true
+}
+
+func buildWatchMinimalRuntimeConfig(opts watchOptions) config.RuntimeConfig {
+	// Minimal mode is for one-off scoped runs without orchestrator yaml.
+	// Keep defaults aligned with README examples for predictable behavior.
+	return config.RuntimeConfig{
+		Root: config.Root{
+			APIVersion: "porch/v1",
+			Kind:       "ReleaseOrchestration",
+			Connection: config.Connection{
+				GitHubOrg: strings.TrimSpace(opts.githubOrg),
+			},
+			Watch: config.Watch{
+				Interval: config.Duration{Duration: 30 * time.Second},
+			},
+			Retry: config.Retry{
+				MaxRetries:       5,
+				RetrySettleDelay: config.Duration{Duration: 90 * time.Second},
+				Backoff: config.Backoff{
+					Initial:    config.Duration{Duration: time.Minute},
+					Multiplier: 1.5,
+					Max:        config.Duration{Duration: 5 * time.Minute},
+				},
+			},
+			Timeout: config.Timeout{
+				Global: config.Duration{Duration: 12 * time.Hour},
+			},
+			Notification: config.Notification{
+				NotifyRowsPerMessage: 12,
+			},
+			Log: config.Log{
+				Level: "info",
+			},
+			ComponentsFile: "",
+			Components:     []config.ComponentSpec{},
+			Dependencies:   map[string]config.Depends{},
+		},
+		Components: []config.LoadedComponent{},
+	}
 }
 
 func initLogger(cfg config.RuntimeConfig, opts commonOptions) (*logrus.Logger, func() error, error) {

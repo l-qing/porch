@@ -28,6 +28,7 @@ func Load(orchestratorPath string) (RuntimeConfig, error) {
 
 type LoadOptions struct {
 	ComponentsFileOverride string
+	GitHubOrgOverride      string
 }
 
 func LoadWithOptions(orchestratorPath string, opts LoadOptions) (RuntimeConfig, error) {
@@ -40,6 +41,9 @@ func LoadWithOptions(orchestratorPath string, opts LoadOptions) (RuntimeConfig, 
 
 	if err := yaml.Unmarshal(orchestratorBytes, &out.Root); err != nil {
 		return out, fmt.Errorf("parse orchestrator yaml: %w", err)
+	}
+	if org := strings.TrimSpace(opts.GitHubOrgOverride); org != "" {
+		out.Root.Connection.GitHubOrg = org
 	}
 
 	if err := ValidateRoot(out.Root); err != nil {
@@ -90,7 +94,7 @@ func LoadWithOptions(orchestratorPath string, opts LoadOptions) (RuntimeConfig, 
 				Name:           c.Name,
 				Repo:           c.Repo,
 				BranchPatterns: c.Patterns,
-				Pipelines:      c.Pipelines,
+				Pipelines:      NormalizePipelineSpecs(c.Pipelines),
 			})
 			continue
 		}
@@ -126,7 +130,7 @@ func appendExpandedRuntimeComponents(merged []LoadedComponent, seenRuntimeName m
 			Name:      name,
 			Repo:      c.Repo,
 			Branch:    branch,
-			Pipelines: c.Pipelines,
+			Pipelines: NormalizePipelineSpecs(c.Pipelines),
 		})
 	}
 	return merged, nil

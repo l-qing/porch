@@ -152,7 +152,7 @@ func runRetryPRMode(
 				continue
 			}
 
-			body := strings.ReplaceAll(p.RetryCommand, "{branch}", branch)
+			body := strings.ReplaceAll(config.NormalizePipelineSpec(p).RetryCommand, "{branch}", branch)
 			logEvent(log, "MANUAL_RETRY", "trigger retry comment", logrus.Fields{
 				"component": target.Name,
 				"pipeline":  p.Name,
@@ -253,7 +253,7 @@ func runRetryBranchMode(
 			continue
 		}
 
-		body := strings.ReplaceAll(p.RetryCommand, "{branch}", branch)
+		body := strings.ReplaceAll(config.NormalizePipelineSpec(p).RetryCommand, "{branch}", branch)
 		logEvent(log, "MANUAL_RETRY", "trigger retry comment", logrus.Fields{
 			"component": target.Name,
 			"pipeline":  p.Name,
@@ -302,18 +302,7 @@ func resolveRetryTargetForPR(components []config.LoadedComponent, componentName,
 		}
 	}
 	base := selected[0]
-	if pipelineName != "" {
-		filtered := make([]config.PipelineSpec, 0, 1)
-		for _, p := range base.Pipelines {
-			if p.Name == pipelineName {
-				filtered = append(filtered, p)
-			}
-		}
-		if len(filtered) == 0 {
-			return nil, fmt.Errorf("pipeline %q not found under component %q", pipelineName, componentName)
-		}
-		base.Pipelines = filtered
-	}
+	applyPipelineScopeToRetryTarget(&base, pipelineName)
 	base.Name = componentName
 	base.Branch = ""
 	return &base, nil
@@ -333,12 +322,14 @@ func resolveRetryTarget(components []config.LoadedComponent, componentName, bran
 		for i := range selected {
 			if selected[i].Branch == branch {
 				copy := selected[i]
+				applyPipelineScopeToRetryTarget(&copy, pipelineName)
 				return &copy, nil
 			}
 		}
 		if len(selected) == 1 {
 			copy := selected[0]
 			copy.Branch = branch
+			applyPipelineScopeToRetryTarget(&copy, pipelineName)
 			return &copy, nil
 		}
 		return nil, fmt.Errorf("branch %q not found under component %q", branch, componentName)
@@ -352,7 +343,28 @@ func resolveRetryTarget(components []config.LoadedComponent, componentName, bran
 		return nil, fmt.Errorf("component %q matches multiple branches %v, please specify --branch or use component@branch", componentName, choices)
 	}
 	copy := selected[0]
+	applyPipelineScopeToRetryTarget(&copy, pipelineName)
 	return &copy, nil
+}
+
+func applyPipelineScopeToRetryTarget(target *config.LoadedComponent, pipelineName string) {
+	if target == nil {
+		return
+	}
+	if strings.TrimSpace(pipelineName) == "" {
+		target.Pipelines = config.NormalizePipelineSpecs(target.Pipelines)
+		return
+	}
+	filtered := make([]config.PipelineSpec, 0, 1)
+	for _, p := range target.Pipelines {
+		if p.Name == pipelineName {
+			filtered = append(filtered, config.NormalizePipelineSpec(p))
+		}
+	}
+	if len(filtered) == 0 {
+		filtered = append(filtered, config.NormalizePipelineSpec(config.PipelineSpec{Name: pipelineName}))
+	}
+	target.Pipelines = filtered
 }
 
 func shouldSkipRetryBySuccess(checkRuns []gh.CheckRun, pipeline string) bool {

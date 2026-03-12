@@ -26,6 +26,7 @@ func newRootCmd() *cobra.Command {
 
 	cmd.PersistentFlags().String("final-branch", "", "override final_action.branch at runtime")
 	cmd.PersistentFlags().String("components-file", "", "override components_file at runtime")
+	cmd.PersistentFlags().String("github-org", "", "override connection.github_org at runtime")
 	cmd.PersistentFlags().Bool("disable-final-action", false, "disable final_action trigger globally")
 	cmd.PersistentFlags().String("log-level", "", "override log level (debug|info|warn|error)")
 	cmd.PersistentFlags().String("probe-mode", "", "probe mode: auto|gh-only|kubectl-first")
@@ -33,6 +34,7 @@ func newRootCmd() *cobra.Command {
 
 	mustBindPFlag(viperKeyFinalBranch, cmd, "final-branch")
 	mustBindPFlag(viperKeyComponentsFile, cmd, "components-file")
+	mustBindPFlag(viperKeyConnectionGitHubOrg, cmd, "github-org")
 	mustBindPFlag(viperKeyDisableFinalAction, cmd, "disable-final-action")
 	mustBindPFlag(viperKeyLogLevel, cmd, "log-level")
 	mustBindPFlag(viperKeyProbeMode, cmd, "probe-mode")

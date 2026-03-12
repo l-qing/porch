@@ -79,9 +79,6 @@ func ValidateRoot(root Root) error {
 			if p.Name == "" {
 				return fmt.Errorf("component %q has empty pipeline name", c.Name)
 			}
-			if p.RetryCommand == "" {
-				return fmt.Errorf("component %q pipeline %q retry_command is required", c.Name, p.Name)
-			}
 		}
 	}
 

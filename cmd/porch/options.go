@@ -24,17 +24,18 @@ const (
 	stateFileSourceFlag        = "flag"
 	stateFileSourceViper       = "viper"
 
-	viperKeyComponentsFile     = "components_file"
-	viperKeyDisableFinalAction = "disable_final_action"
-	viperKeyFinalBranch        = "final_branch"
-	viperKeyLogLevel           = "log_level"
-	viperKeyProbeMode          = "probe_mode"
-	viperKeyVerbose            = "verbose"
-	viperKeyStatusConfig       = "status.config"
-	viperKeyRetryConfig        = "retry.config"
-	viperKeyWatchConfig        = "watch.config"
-	viperKeyWatchStateFile     = "watch.state_file"
-	viperKeyWatchExitAfterDone = "watch.exit_after_final_ok"
+	viperKeyComponentsFile      = "components_file"
+	viperKeyConnectionGitHubOrg = "connection.github_org"
+	viperKeyDisableFinalAction  = "disable_final_action"
+	viperKeyFinalBranch         = "final_branch"
+	viperKeyLogLevel            = "log_level"
+	viperKeyProbeMode           = "probe_mode"
+	viperKeyVerbose             = "verbose"
+	viperKeyStatusConfig        = "status.config"
+	viperKeyRetryConfig         = "retry.config"
+	viperKeyWatchConfig         = "watch.config"
+	viperKeyWatchStateFile      = "watch.state_file"
+	viperKeyWatchExitAfterDone  = "watch.exit_after_final_ok"
 )
 
 var defaultStateRunSequence uint64
@@ -42,6 +43,7 @@ var defaultStateRunSequence uint64
 type commonOptions struct {
 	configPath         string
 	componentsFile     string
+	githubOrg          string
 	disableFinalAction bool
 	logLevel           string
 	probeMode          string
@@ -57,6 +59,10 @@ func (o *commonOptions) complete(configKey string) {
 	o.componentsFile = strings.TrimSpace(firstNonEmpty(
 		o.componentsFile,
 		viper.GetString(viperKeyComponentsFile),
+	))
+	o.githubOrg = strings.TrimSpace(firstNonEmpty(
+		o.githubOrg,
+		viper.GetString(viperKeyConnectionGitHubOrg),
 	))
 	if !o.disableFinalAction {
 		o.disableFinalAction = viper.GetBool(viperKeyDisableFinalAction)

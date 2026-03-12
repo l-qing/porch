@@ -68,6 +68,8 @@ var _ = Describe("PR mode helpers", func() {
 		wantNames     []string
 		wantBranches  []string
 		wantPRs       []int
+		wantPipeline  string
+		wantRetryCmd  string
 		wantErrSubstr string
 	}
 
@@ -108,6 +110,11 @@ var _ = Describe("PR mode helpers", func() {
 				Expect(tc.cfg.Components[i].Name).To(Equal(tc.wantNames[i]))
 				Expect(tc.cfg.Components[i].Branch).To(Equal(tc.wantBranches[i]))
 				Expect(tc.cfg.Components[i].PRNumber).To(Equal(tc.wantPRs[i]))
+				if tc.wantPipeline != "" {
+					Expect(tc.cfg.Components[i].Pipelines).To(HaveLen(1))
+					Expect(tc.cfg.Components[i].Pipelines[0].Name).To(Equal(tc.wantPipeline))
+					Expect(tc.cfg.Components[i].Pipelines[0].RetryCommand).To(Equal(tc.wantRetryCmd))
+				}
 			}
 		},
 		Entry("expands configured component by PR list", scopeCase{
@@ -130,6 +137,8 @@ var _ = Describe("PR mode helpers", func() {
 			wantNames:    []string{"catalog#101", "catalog#202"},
 			wantBranches: []string{"feat/a", "feat/b"},
 			wantPRs:      []int{101, 202},
+			wantPipeline: "catalog-all-in-one",
+			wantRetryCmd: "/test catalog-all-in-one branch:{branch}",
 		}),
 		Entry("supports ad-hoc component repo with pipeline", scopeCase{
 			description: "ad-hoc mode",
@@ -144,6 +153,31 @@ var _ = Describe("PR mode helpers", func() {
 			wantNames:    []string{"catalog#101"},
 			wantBranches: []string{"feat/a"},
 			wantPRs:      []int{101},
+			wantPipeline: "catalog-all-in-one",
+			wantRetryCmd: "/test catalog-all-in-one branch:{branch}",
+		}),
+		Entry("synthesizes requested pipeline when component exists but pipeline is not preconfigured", scopeCase{
+			description: "configured component with ad-hoc pipeline scope",
+			cfg: config.RuntimeConfig{
+				Root: config.Root{
+					Connection: config.Connection{GitHubOrg: "TestGroup"},
+				},
+				Components: []config.LoadedComponent{
+					{
+						Name: "catalog", Repo: "catalog", BranchPatterns: []string{"^main$"},
+						Pipelines: []config.PipelineSpec{{Name: "catalog-all-in-one", RetryCommand: "/test catalog-all-in-one branch:{branch}"}},
+					},
+				},
+			},
+			component:    "catalog",
+			pipeline:     "catalog-special",
+			prs:          []int{101},
+			expectCalls:  []string{"api repos/TestGroup/catalog/pulls/101"},
+			wantNames:    []string{"catalog#101"},
+			wantBranches: []string{"feat/a"},
+			wantPRs:      []int{101},
+			wantPipeline: "catalog-special",
+			wantRetryCmd: "/test catalog-special branch:{branch}",
 		}),
 		Entry("fails when component is missing without pipeline", scopeCase{
 			description: "component required in config mode",
@@ -164,6 +198,7 @@ var _ = Describe("PR mode helpers", func() {
 		pipeline      string
 		wantRepo      string
 		wantPipelines []string
+		wantCommands  []string
 		wantErrSubstr string
 	}
 
@@ -178,10 +213,13 @@ var _ = Describe("PR mode helpers", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(target.Repo).To(Equal(tc.wantRepo))
 			got := make([]string, 0, len(target.Pipelines))
+			gotCommands := make([]string, 0, len(target.Pipelines))
 			for _, p := range target.Pipelines {
 				got = append(got, p.Name)
+				gotCommands = append(gotCommands, p.RetryCommand)
 			}
 			Expect(got).To(Equal(tc.wantPipelines))
+			Expect(gotCommands).To(Equal(tc.wantCommands))
 		},
 		Entry("collapses multi-branch component to one retry target", retryTargetCase{
 			description: "configured multi branch",
@@ -192,6 +230,7 @@ var _ = Describe("PR mode helpers", func() {
 			component:     "catalog",
 			wantRepo:      "catalog",
 			wantPipelines: []string{"catalog-all-in-one"},
+			wantCommands:  []string{"/test catalog-all-in-one branch:{branch}"},
 		}),
 		Entry("supports ad-hoc retry target when component is missing", retryTargetCase{
 			description:   "ad-hoc with pipeline",
@@ -200,6 +239,18 @@ var _ = Describe("PR mode helpers", func() {
 			pipeline:      "catalog-all-in-one",
 			wantRepo:      "catalog",
 			wantPipelines: []string{"catalog-all-in-one"},
+			wantCommands:  []string{"/test catalog-all-in-one branch:{branch}"},
+		}),
+		Entry("synthesizes pipeline when requested pipeline is absent in configured component", retryTargetCase{
+			description: "configured component with custom scoped pipeline",
+			components: []config.LoadedComponent{
+				{Name: "catalog", Repo: "catalog", Branch: "main", Pipelines: []config.PipelineSpec{{Name: "catalog-all-in-one"}}},
+			},
+			component:     "catalog",
+			pipeline:      "catalog-special",
+			wantRepo:      "catalog",
+			wantPipelines: []string{"catalog-special"},
+			wantCommands:  []string{"/test catalog-special branch:{branch}"},
 		}),
 		Entry("errors when component is missing without pipeline", retryTargetCase{
 			description:   "missing component",

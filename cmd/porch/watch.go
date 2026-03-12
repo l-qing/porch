@@ -159,7 +159,7 @@ func newWatchCmd() *cobra.Command {
 }
 
 func runWatch(opts watchOptions) error {
-	cfg, err := loadRuntimeConfig(opts.commonOptions)
+	cfg, err := loadRuntimeConfigForWatch(opts)
 	if err != nil {
 		return err
 	}
@@ -476,6 +476,7 @@ func resolvePatternComponents(ctx context.Context, cfg config.RuntimeConfig, ghc
 				return cfg, fmt.Errorf("duplicated runtime component name %q after branch pattern expansion", c.Name)
 			}
 			seen[c.Name] = struct{}{}
+			c.Pipelines = config.NormalizePipelineSpecs(c.Pipelines)
 			expanded = append(expanded, c)
 			continue
 		}
@@ -524,7 +525,7 @@ func resolvePatternComponents(ctx context.Context, cfg config.RuntimeConfig, ghc
 				Name:      name,
 				Repo:      c.Repo,
 				Branch:    branch,
-				Pipelines: c.Pipelines,
+				Pipelines: config.NormalizePipelineSpecs(c.Pipelines),
 			})
 		}
 	}
@@ -622,11 +623,12 @@ func applyWatchPRScope(ctx context.Context, cfg *config.RuntimeConfig, component
 		filtered := make([]config.PipelineSpec, 0, 1)
 		for _, p := range base.Pipelines {
 			if p.Name == pipelineName {
-				filtered = append(filtered, p)
+				filtered = append(filtered, config.NormalizePipelineSpec(p))
 			}
 		}
 		if len(filtered) == 0 {
-			return fmt.Errorf("pipeline %q not found under component %q", pipelineName, componentName)
+			// Allow one-off scoped execution even when pipeline is not pre-declared in config.
+			filtered = append(filtered, config.NormalizePipelineSpec(config.PipelineSpec{Name: pipelineName}))
 		}
 		base.Pipelines = filtered
 	}
@@ -758,21 +760,18 @@ func applyWatchScopeWithBranchLister(ctx context.Context, cfg *config.RuntimeCon
 	}
 
 	if pipelineName != "" {
-		found := false
 		for i := range selected {
 			filtered := make([]config.PipelineSpec, 0, 1)
 			for _, p := range selected[i].Pipelines {
 				if p.Name == pipelineName {
-					filtered = append(filtered, p)
+					filtered = append(filtered, config.NormalizePipelineSpec(p))
 				}
 			}
-			if len(filtered) > 0 {
-				found = true
+			if len(filtered) == 0 {
+				// Keep scoped runs lightweight: synthesize a default retry command from CLI args.
+				filtered = append(filtered, config.NormalizePipelineSpec(config.PipelineSpec{Name: pipelineName}))
 			}
 			selected[i].Pipelines = filtered
-		}
-		if !found {
-			return false, fmt.Errorf("pipeline %q not found under component %q", pipelineName, componentName)
 		}
 	}
 
@@ -1385,7 +1384,7 @@ func toTracked(cfg config.RuntimeConfig, rs []component.RuntimeComponent) (map[s
 				tp = &trackedPipeline{Name: p.Name, Status: pipestatus.StatusMissing, Conclusion: "-"}
 				tc.Pipelines[p.Name] = tp
 			}
-			tp.RetryCmd = p.RetryCommand
+			tp.RetryCmd = config.NormalizePipelineSpec(p).RetryCommand
 		}
 		tc.PRNumber = c.PRNumber
 	}
