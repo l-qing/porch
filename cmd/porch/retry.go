@@ -21,6 +21,7 @@ type retryOptions struct {
 	componentName string
 	pipelineName  string
 	branch        string
+	tag           string
 	prs           string
 	force         bool
 	dryRun        bool
@@ -43,6 +44,7 @@ func newRetryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.componentName, "component", "", "component name")
 	cmd.Flags().StringVar(&opts.pipelineName, "pipeline", "", "pipeline name")
 	cmd.Flags().StringVar(&opts.branch, "branch", "", "override target branch at runtime")
+	cmd.Flags().StringVar(&opts.tag, "tag", "", "override target ref by tag at runtime")
 	cmd.Flags().StringVar(&opts.prs, "prs", "", "comma-separated pull request numbers, e.g. 123,456")
 	cmd.Flags().BoolVar(&opts.force, "force", false, "force retry even if pipeline already succeeded")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "do not send gh comments")
@@ -72,6 +74,12 @@ func runRetry(opts retryOptions) error {
 	if len(prNumbers) > 0 && strings.TrimSpace(opts.branch) != "" {
 		return fmt.Errorf("--prs and --branch are mutually exclusive")
 	}
+	if len(prNumbers) > 0 && strings.TrimSpace(opts.tag) != "" {
+		return fmt.Errorf("--prs and --tag are mutually exclusive")
+	}
+	if strings.TrimSpace(opts.branch) != "" && strings.TrimSpace(opts.tag) != "" {
+		return fmt.Errorf("--branch and --tag are mutually exclusive")
+	}
 	componentName := strings.TrimSpace(opts.componentName)
 	pipelineName := strings.TrimSpace(opts.pipelineName)
 	if len(prNumbers) > 0 {
@@ -97,6 +105,7 @@ func runRetryPRMode(
 		"component": opts.componentName,
 		"pipeline":  normalize(opts.pipelineName),
 		"branch":    "-",
+		"tag":       "-",
 		"prs":       normalize(strings.TrimSpace(opts.prs)),
 		"force":     fmt.Sprintf("%t", opts.force),
 		"dry_run":   fmt.Sprintf("%t", opts.dryRun),
@@ -197,26 +206,30 @@ func runRetryBranchMode(
 	if err != nil {
 		return err
 	}
-	target, err := resolveRetryTarget(cfg.Components, componentName, strings.TrimSpace(opts.branch), pipelineName)
+	target, err := resolveRetryTarget(cfg.Components, componentName, strings.TrimSpace(opts.branch), strings.TrimSpace(opts.tag), pipelineName)
 	if err != nil {
 		return err
 	}
-	branch := target.Branch
+	ref := target.Branch
 	if strings.TrimSpace(opts.branch) != "" {
-		branch = strings.TrimSpace(opts.branch)
+		ref = strings.TrimSpace(opts.branch)
+	}
+	if strings.TrimSpace(opts.tag) != "" {
+		ref = strings.TrimSpace(opts.tag)
 	}
 
 	log.WithFields(logrus.Fields{
 		"component": opts.componentName,
 		"pipeline":  normalize(opts.pipelineName),
-		"branch":    branch,
+		"branch":    ref,
+		"tag":       normalize(opts.tag),
 		"prs":       "-",
 		"force":     fmt.Sprintf("%t", opts.force),
 		"dry_run":   fmt.Sprintf("%t", opts.dryRun),
 		"config":    opts.configPath,
 	}).Info("retry command initialized")
 
-	sha, err := ghc.BranchSHA(ctx, target.Repo, branch)
+	sha, err := ghc.BranchSHA(ctx, target.Repo, ref)
 	if err != nil {
 		return err
 	}
@@ -225,7 +238,7 @@ func runRetryBranchMode(
 		// Manual retry should remain available even when status lookup is degraded.
 		logEvent(log, "RETRY_WARN", fmt.Sprintf("check-runs query failed, fallback to direct retry trigger: %v", err), logrus.Fields{
 			"component": target.Name,
-			"branch":    branch,
+			"branch":    ref,
 			"sha":       sha[:8],
 		})
 		checkRuns = nil
@@ -247,17 +260,17 @@ func runRetryBranchMode(
 			logEvent(log, "MANUAL_SKIP", "pipeline already succeeded on current commit, skip retry", logrus.Fields{
 				"component": target.Name,
 				"pipeline":  p.Name,
-				"branch":    branch,
+				"branch":    ref,
 				"sha":       sha[:8],
 			})
 			continue
 		}
 
-		body := strings.ReplaceAll(config.NormalizePipelineSpec(p).RetryCommand, "{branch}", branch)
+		body := strings.ReplaceAll(config.NormalizePipelineSpec(p).RetryCommand, "{branch}", ref)
 		logEvent(log, "MANUAL_RETRY", "trigger retry comment", logrus.Fields{
 			"component": target.Name,
 			"pipeline":  p.Name,
-			"branch":    branch,
+			"branch":    ref,
 			"sha":       sha[:8],
 			"command":   body,
 			"dry_run":   fmt.Sprintf("%t", opts.dryRun),
@@ -308,14 +321,20 @@ func resolveRetryTargetForPR(components []config.LoadedComponent, componentName,
 	return &base, nil
 }
 
-func resolveRetryTarget(components []config.LoadedComponent, componentName, branch, pipelineName string) (*config.LoadedComponent, error) {
+func resolveRetryTarget(components []config.LoadedComponent, componentName, branch, tag, pipelineName string) (*config.LoadedComponent, error) {
 	selected := matchComponentsBySelector(components, componentName)
 	if len(selected) == 0 {
 		if pipelineName != "" {
-			copy := buildAdHocComponent(componentName, pipelineName, branch)
+			ref := firstNonEmpty(tag, branch)
+			copy := buildAdHocComponent(componentName, pipelineName, ref)
 			return &copy, nil
 		}
 		return nil, fmt.Errorf("component %q not found", componentName)
+	}
+	if tag != "" {
+		copy := withRuntimeComponentRef(selected[0], tag)
+		applyPipelineScopeToRetryTarget(&copy, pipelineName)
+		return &copy, nil
 	}
 
 	if branch != "" {
@@ -340,7 +359,7 @@ func resolveRetryTarget(components []config.LoadedComponent, componentName, bran
 		for _, c := range selected {
 			choices = append(choices, c.Name)
 		}
-		return nil, fmt.Errorf("component %q matches multiple branches %v, please specify --branch or use component@branch", componentName, choices)
+		return nil, fmt.Errorf("component %q matches multiple branches %v, please specify --branch/--tag or use component@branch", componentName, choices)
 	}
 	copy := selected[0]
 	applyPipelineScopeToRetryTarget(&copy, pipelineName)

@@ -13,6 +13,7 @@ var _ = Describe("retry scope pipeline synthesis", func() {
 		components    []config.LoadedComponent
 		component     string
 		branch        string
+		tag           string
 		pipeline      string
 		wantName      string
 		wantBranch    string
@@ -23,7 +24,7 @@ var _ = Describe("retry scope pipeline synthesis", func() {
 
 	DescribeTable("resolveRetryTarget",
 		func(tc testCase) {
-			target, err := resolveRetryTarget(tc.components, tc.component, tc.branch, tc.pipeline)
+			target, err := resolveRetryTarget(tc.components, tc.component, tc.branch, tc.tag, tc.pipeline)
 			if tc.wantErrSubstr != "" {
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring(tc.wantErrSubstr))
@@ -60,6 +61,20 @@ var _ = Describe("retry scope pipeline synthesis", func() {
 			pipeline:     "catalog-special",
 			wantName:     "catalog",
 			wantBranch:   "release-1.0",
+			wantPipeline: "catalog-special",
+			wantRetryCmd: "/test catalog-special branch:{branch}",
+		}),
+		Entry("supports runtime tag override for multi-branch component", testCase{
+			description: "override to tag ref",
+			components: []config.LoadedComponent{
+				{Name: "catalog@main", Repo: "catalog", Branch: "main", Pipelines: []config.PipelineSpec{{Name: "catalog-all-in-one"}}},
+				{Name: "catalog@release-1.0", Repo: "catalog", Branch: "release-1.0", Pipelines: []config.PipelineSpec{{Name: "catalog-all-in-one"}}},
+			},
+			component:    "catalog",
+			tag:          "v1.2.3",
+			pipeline:     "catalog-special",
+			wantName:     "catalog@v1.2.3",
+			wantBranch:   "v1.2.3",
 			wantPipeline: "catalog-special",
 			wantRetryCmd: "/test catalog-special branch:{branch}",
 		}),

@@ -63,6 +63,7 @@ type watchOptions struct {
 	componentName  string
 	pipelineName   string
 	branch         string
+	tag            string
 	branchPattern  string
 	prs            string
 	dryRun         bool
@@ -149,6 +150,7 @@ func newWatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.componentName, "component", "", "watch only one component")
 	cmd.Flags().StringVar(&opts.pipelineName, "pipeline", "", "watch only one pipeline under selected component")
 	cmd.Flags().StringVar(&opts.branch, "branch", "", "override selected component branch at runtime")
+	cmd.Flags().StringVar(&opts.tag, "tag", "", "override selected component ref by tag at runtime")
 	cmd.Flags().StringVar(&opts.branchPattern, "branch-pattern", "", "select branches by regular expression under selected component")
 	cmd.Flags().StringVar(&opts.prs, "prs", "", "comma-separated pull request numbers, e.g. 123,456")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "query only, do not trigger retry")
@@ -216,6 +218,7 @@ func runWatch(opts watchOptions) error {
 		"component_scope":      normalize(strings.TrimSpace(opts.componentName)),
 		"pipeline_scope":       normalize(strings.TrimSpace(opts.pipelineName)),
 		"branch_override":      normalize(strings.TrimSpace(opts.branch)),
+		"tag_scope":            normalize(strings.TrimSpace(opts.tag)),
 		"branch_pattern_scope": normalize(strings.TrimSpace(opts.branchPattern)),
 		"prs":                  normalize(strings.TrimSpace(opts.prs)),
 		"scoped_mode":          fmt.Sprintf("%t", scopedMode),
@@ -541,6 +544,10 @@ type branchLister interface {
 func shouldSkipPatternResolutionForAdHocScope(components []config.LoadedComponent, opts watchOptions) bool {
 	componentName := strings.TrimSpace(opts.componentName)
 	pipelineName := strings.TrimSpace(opts.pipelineName)
+	tag := strings.TrimSpace(opts.tag)
+	if componentName != "" && tag != "" {
+		return true
+	}
 	if componentName == "" || pipelineName == "" {
 		return false
 	}
@@ -552,6 +559,10 @@ func selectComponentsForPatternResolution(components []config.LoadedComponent, o
 	componentName := strings.TrimSpace(opts.componentName)
 	if componentName == "" {
 		return components, false
+	}
+	if strings.TrimSpace(opts.tag) != "" {
+		// Tag-scoped watch resolves by explicit ref and does not need branch listing.
+		return components, true
 	}
 	selected := matchComponentsBySelector(components, componentName)
 	if len(selected) == 0 {
@@ -567,6 +578,9 @@ func prepareWatchPRMode(ctx context.Context, cfg *config.RuntimeConfig, opts wat
 	}
 	if strings.TrimSpace(opts.branch) != "" {
 		return false, fmt.Errorf("--prs and --branch are mutually exclusive")
+	}
+	if strings.TrimSpace(opts.tag) != "" {
+		return false, fmt.Errorf("--prs and --tag are mutually exclusive")
 	}
 	if strings.TrimSpace(opts.branchPattern) != "" {
 		return false, fmt.Errorf("--prs and --branch-pattern are mutually exclusive")
@@ -665,10 +679,17 @@ func applyWatchScopeWithBranchLister(ctx context.Context, cfg *config.RuntimeCon
 	componentName := strings.TrimSpace(opts.componentName)
 	pipelineName := strings.TrimSpace(opts.pipelineName)
 	branch := strings.TrimSpace(opts.branch)
+	tag := strings.TrimSpace(opts.tag)
 	branchPattern := strings.TrimSpace(opts.branchPattern)
 
 	if branch != "" && branchPattern != "" {
 		return false, fmt.Errorf("--branch and --branch-pattern are mutually exclusive")
+	}
+	if branch != "" && tag != "" {
+		return false, fmt.Errorf("--branch and --tag are mutually exclusive")
+	}
+	if tag != "" && branchPattern != "" {
+		return false, fmt.Errorf("--tag and --branch-pattern are mutually exclusive")
 	}
 
 	var branchRegex *regexp.Regexp
@@ -686,6 +707,9 @@ func applyWatchScopeWithBranchLister(ctx context.Context, cfg *config.RuntimeCon
 		}
 		if branch != "" {
 			return false, fmt.Errorf("--branch requires --component")
+		}
+		if tag != "" {
+			return false, fmt.Errorf("--tag requires --component")
 		}
 		if branchPattern != "" {
 			return false, fmt.Errorf("--branch-pattern requires --component")
@@ -726,8 +750,13 @@ func applyWatchScopeWithBranchLister(ctx context.Context, cfg *config.RuntimeCon
 				selected = append(selected, adHoc)
 			}
 		} else {
-			selected = []config.LoadedComponent{buildAdHocComponent(componentName, pipelineName, branch)}
+			ref := firstNonEmpty(tag, branch)
+			selected = []config.LoadedComponent{buildAdHocComponent(componentName, pipelineName, ref)}
 		}
+	}
+	if tag != "" {
+		// Tag scope always resolves to a single runtime component ref.
+		selected = []config.LoadedComponent{withRuntimeComponentRef(selected[0], tag)}
 	}
 
 	if branch != "" {
@@ -785,6 +814,19 @@ func runtimeComponentBaseName(c config.LoadedComponent) string {
 		return strings.TrimSuffix(c.Name, suffix)
 	}
 	return c.Name
+}
+
+func withRuntimeComponentRef(c config.LoadedComponent, ref string) config.LoadedComponent {
+	updated := c
+	normalizedRef := strings.TrimSpace(ref)
+	updated.Branch = normalizedRef
+	baseName := runtimeComponentBaseName(c)
+	if normalizedRef == "" {
+		updated.Name = baseName
+	} else {
+		updated.Name = fmt.Sprintf("%s@%s", baseName, normalizedRef)
+	}
+	return updated
 }
 
 func expandRuntimeDependencies(components []config.LoadedComponent, raw map[string]config.Depends) map[string]config.Depends {

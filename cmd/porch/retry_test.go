@@ -12,7 +12,7 @@ func TestResolveRetryTargetByBaseAndBranch(t *testing.T) {
 		{Name: "tektoncd-pipeline@release-1.8", Branch: "release-1.8"},
 	}
 
-	target, err := resolveRetryTarget(components, "tektoncd-pipeline", "release-1.8", "")
+	target, err := resolveRetryTarget(components, "tektoncd-pipeline", "release-1.8", "", "")
 	if err != nil {
 		t.Fatalf("resolveRetryTarget error: %v", err)
 	}
@@ -27,7 +27,7 @@ func TestResolveRetryTargetRequireBranchWhenMultipleMatched(t *testing.T) {
 		{Name: "tektoncd-pipeline@release-1.8", Branch: "release-1.8"},
 	}
 
-	_, err := resolveRetryTarget(components, "tektoncd-pipeline", "", "")
+	_, err := resolveRetryTarget(components, "tektoncd-pipeline", "", "", "")
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -38,7 +38,7 @@ func TestResolveRetryTargetBuildsAdHocComponentWhenMissingInConfig(t *testing.T)
 		{Name: "tektoncd-pipeline", Repo: "tektoncd-pipeline", Branch: "main"},
 	}
 
-	target, err := resolveRetryTarget(components, "tektoncd-operator", "main", "to-all-in-one")
+	target, err := resolveRetryTarget(components, "tektoncd-operator", "main", "", "to-all-in-one")
 	if err != nil {
 		t.Fatalf("resolveRetryTarget error: %v", err)
 	}

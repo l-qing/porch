@@ -84,6 +84,7 @@ make build
 - `--component`：组件名（必填）
 - `--pipeline`：流水线名（可选）
 - `--branch`：运行时覆盖目标分支（可选，不会修改配置文件）
+- `--tag`：运行时按 tag 覆盖目标 ref（可选，不会修改配置文件；与 `--branch` 互斥）
 - `--prs`：PR 编号列表，逗号分隔（可选，例如 `123,456`）
 - `--force`：即使目标流水线已成功也强制触发重试（可选）
 - `--dry-run`：只打印，不发送 gh comment
@@ -108,8 +109,9 @@ make build
 - `--component`：仅监控指定组件（可选）
 - `--pipeline`：仅监控指定组件下的某条流水线（可选，需配合 `--component`）
 - `--branch`：仅覆盖 `--component` 对应组件分支（可选，需配合 `--component`）
-- `--branch-pattern`: filter multiple branches under `--component` using Go regexp (optional, requires `--component`, mutually exclusive with `--branch`, example: `^(main|release-[0-9]+[.][0-9]+)$`)
-- `--prs`：PR 编号列表，逗号分隔（可选，需配合 `--component`；与 `--branch` / `--branch-pattern` 互斥）
+- `--tag`：仅覆盖 `--component` 对应组件 tag ref（可选，需配合 `--component`；与 `--branch` / `--branch-pattern` 互斥）
+- `--branch-pattern`: filter multiple branches under `--component` using Go regexp (optional, requires `--component`, mutually exclusive with `--branch` and `--tag`, example: `^(main|release-[0-9]+[.][0-9]+)$`)
+- `--prs`：PR 编号列表，逗号分隔（可选，需配合 `--component`；与 `--branch` / `--tag` / `--branch-pattern` 互斥）
 - `--exit-after-final-ok`：`FINAL_OK` 后立即退出（默认不退出，保持常驻）
 - `--dry-run`：监控与计算执行，但不发送重试/final comment
 
@@ -139,12 +141,14 @@ PR 模式：
 - `--prs` 会按 PR 编号直接扩展运行时目标，并使用各 PR 的 `head.ref` 作为运行分支。
 - PR 模式会基于各 PR 的 `head.sha` 解析流水线状态，而不是按分支最新提交查询。
 - 重试评论会发送到 PR 评论接口（`issues/{number}/comments`），而不是 commit 评论接口。
-- `--prs` 与 `--branch` / `--branch-pattern` 互斥。
+- `--prs` 与 `--branch` / `--tag` / `--branch-pattern` 互斥。
 
 示例：
 
 ```bash
 ./bin/porch watch --config ./config.yaml --component tektoncd-operator --pipeline to-all-in-one --branch main --exit-after-final-ok
+
+./bin/porch watch --config ./config.yaml --component tektoncd-pac --pipeline pac-all-in-one --tag v0.46.0 --exit-after-final-ok
 
 ./bin/porch watch --config ./config.yaml --component tektoncd-operator --pipeline to-all-in-one --branch-pattern "^(main|release-.*)$" --exit-after-final-ok
 

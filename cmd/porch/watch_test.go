@@ -609,6 +609,13 @@ func TestShouldSkipPatternResolutionForAdHocScope(t *testing.T) {
 	}) {
 		t.Fatalf("expect skip=false when pipeline is empty")
 	}
+
+	if !shouldSkipPatternResolutionForAdHocScope(components, watchOptions{
+		componentName: "tektoncd-pipeline",
+		tag:           "v1.9.0",
+	}) {
+		t.Fatalf("expect skip=true when tag scope is set")
+	}
 }
 
 func TestSelectComponentsForPatternResolution(t *testing.T) {
@@ -655,6 +662,17 @@ func TestSelectComponentsForPatternResolution(t *testing.T) {
 	if len(selected) != 2 {
 		t.Fatalf("selected len=%d, want original components len 2", len(selected))
 	}
+
+	selected, skip = selectComponentsForPatternResolution(components, watchOptions{
+		componentName: "tektoncd-pipeline",
+		tag:           "v1.9.0",
+	})
+	if !skip {
+		t.Fatalf("expect skip=true when tag scope is set")
+	}
+	if len(selected) != 2 {
+		t.Fatalf("selected len=%d, want original components len 2", len(selected))
+	}
 }
 
 func TestApplyWatchScopeBuildsAdHocComponentWhenMissingInConfig(t *testing.T) {
@@ -694,6 +712,34 @@ func TestApplyWatchScopeBuildsAdHocComponentWhenMissingInConfig(t *testing.T) {
 	}
 }
 
+func TestApplyWatchScopeBuildsAdHocComponentByTagWhenMissingInConfig(t *testing.T) {
+	cfg := config.RuntimeConfig{
+		Components: []config.LoadedComponent{
+			{Name: "tektoncd-pipeline", Repo: "tektoncd-pipeline", Branch: "main", Pipelines: []config.PipelineSpec{{Name: "tp-all-in-one"}}},
+		},
+	}
+	opts := watchOptions{
+		componentName: "tektoncd-pac",
+		pipelineName:  "pac-all-in-one",
+		tag:           "v0.46.0",
+	}
+
+	scoped, err := applyWatchScope(&cfg, opts)
+	if err != nil {
+		t.Fatalf("applyWatchScope error: %v", err)
+	}
+	if !scoped {
+		t.Fatalf("expect scoped=true")
+	}
+	if len(cfg.Components) != 1 {
+		t.Fatalf("components len=%d, want 1", len(cfg.Components))
+	}
+	c := cfg.Components[0]
+	if c.Name != "tektoncd-pac@v0.46.0" || c.Repo != "tektoncd-pac" || c.Branch != "v0.46.0" {
+		t.Fatalf("unexpected ad-hoc component: %+v", c)
+	}
+}
+
 func TestApplyWatchScopeByBaseNameAndBranchPattern(t *testing.T) {
 	cfg := config.RuntimeConfig{
 		Components: []config.LoadedComponent{
@@ -728,6 +774,37 @@ func TestApplyWatchScopeByBaseNameAndBranchPattern(t *testing.T) {
 	}
 }
 
+func TestApplyWatchScopeByTag(t *testing.T) {
+	cfg := config.RuntimeConfig{
+		Components: []config.LoadedComponent{
+			{Name: "tektoncd-pipeline@main", Repo: "tektoncd-pipeline", Branch: "main", Pipelines: []config.PipelineSpec{{Name: "tp-all-in-one"}}},
+			{Name: "tektoncd-pipeline@release-1.8", Repo: "tektoncd-pipeline", Branch: "release-1.8", Pipelines: []config.PipelineSpec{{Name: "tp-all-in-one"}}},
+		},
+	}
+	opts := watchOptions{
+		componentName: "tektoncd-pipeline",
+		tag:           "v1.11.0",
+		pipelineName:  "tp-all-in-one",
+	}
+
+	scoped, err := applyWatchScope(&cfg, opts)
+	if err != nil {
+		t.Fatalf("applyWatchScope error: %v", err)
+	}
+	if !scoped {
+		t.Fatalf("expect scoped=true")
+	}
+	if len(cfg.Components) != 1 {
+		t.Fatalf("components len=%d, want 1", len(cfg.Components))
+	}
+	if cfg.Components[0].Name != "tektoncd-pipeline@v1.11.0" {
+		t.Fatalf("selected component=%q", cfg.Components[0].Name)
+	}
+	if cfg.Components[0].Branch != "v1.11.0" {
+		t.Fatalf("selected branch=%q, want v1.11.0", cfg.Components[0].Branch)
+	}
+}
+
 func TestApplyWatchScopeRejectsBranchAndBranchPatternTogether(t *testing.T) {
 	cfg := config.RuntimeConfig{
 		Components: []config.LoadedComponent{
@@ -744,12 +821,54 @@ func TestApplyWatchScopeRejectsBranchAndBranchPatternTogether(t *testing.T) {
 	}
 }
 
+func TestApplyWatchScopeRejectsTagAndBranchTogether(t *testing.T) {
+	cfg := config.RuntimeConfig{
+		Components: []config.LoadedComponent{
+			{Name: "tektoncd-pipeline", Repo: "tektoncd-pipeline", Branch: "main", Pipelines: []config.PipelineSpec{{Name: "tp-all-in-one"}}},
+		},
+	}
+	_, err := applyWatchScope(&cfg, watchOptions{
+		componentName: "tektoncd-pipeline",
+		branch:        "main",
+		tag:           "v1.11.0",
+	})
+	if err == nil || err.Error() != "--branch and --tag are mutually exclusive" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestApplyWatchScopeRejectsTagAndBranchPatternTogether(t *testing.T) {
+	cfg := config.RuntimeConfig{
+		Components: []config.LoadedComponent{
+			{Name: "tektoncd-pipeline", Repo: "tektoncd-pipeline", Branch: "main", Pipelines: []config.PipelineSpec{{Name: "tp-all-in-one"}}},
+		},
+	}
+	_, err := applyWatchScope(&cfg, watchOptions{
+		componentName: "tektoncd-pipeline",
+		tag:           "v1.11.0",
+		branchPattern: "^main$",
+	})
+	if err == nil || err.Error() != "--tag and --branch-pattern are mutually exclusive" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestApplyWatchScopeRejectsBranchPatternWithoutComponent(t *testing.T) {
 	cfg := config.RuntimeConfig{}
 	_, err := applyWatchScope(&cfg, watchOptions{
 		branchPattern: "^release-.*$",
 	})
 	if err == nil || err.Error() != "--branch-pattern requires --component" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestApplyWatchScopeRejectsTagWithoutComponent(t *testing.T) {
+	cfg := config.RuntimeConfig{}
+	_, err := applyWatchScope(&cfg, watchOptions{
+		tag: "v1.11.0",
+	})
+	if err == nil || err.Error() != "--tag requires --component" {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
