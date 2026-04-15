@@ -32,7 +32,24 @@ func matchComponentsBySelector(components []config.LoadedComponent, selector str
 	}
 }
 
-func buildAdHocComponent(repo, pipeline, branch string) config.LoadedComponent {
+// normalizePipelineSpecForScope normalizes a pipeline spec and, when extraArgs
+// is non-empty, overrides the RetryCommand so CLI-provided PAC arguments take
+// precedence over any retry_command pre-declared in config. The normalized
+// Name always stays bare so check-run matching continues to work.
+func normalizePipelineSpecForScope(spec config.PipelineSpec, extraArgs string) config.PipelineSpec {
+	normalized := config.NormalizePipelineSpec(spec)
+	if strings.TrimSpace(extraArgs) != "" {
+		normalized.RetryCommand = config.DefaultRetryCommandWithArgs(normalized.Name, extraArgs)
+	}
+	return normalized
+}
+
+// buildAdHocComponent constructs a transient component when --pipeline is used
+// for a pipeline not pre-declared in config. extraArgs carries PAC-style
+// arguments parsed from the --pipeline flag (e.g. "version_scope=all") so they
+// are appended to the generated /test comment while the pipeline Name stays
+// bare for check-run matching.
+func buildAdHocComponent(repo, pipeline, extraArgs, branch string) config.LoadedComponent {
 	effectiveBranch := strings.TrimSpace(branch)
 	if effectiveBranch == "" {
 		effectiveBranch = "main"
@@ -43,7 +60,7 @@ func buildAdHocComponent(repo, pipeline, branch string) config.LoadedComponent {
 		Branch: effectiveBranch,
 		Pipelines: []config.PipelineSpec{{
 			Name:         pipeline,
-			RetryCommand: config.DefaultRetryCommand(pipeline),
+			RetryCommand: config.DefaultRetryCommandWithArgs(pipeline, extraArgs),
 		}},
 	}
 }

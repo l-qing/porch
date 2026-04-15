@@ -24,7 +24,7 @@ var _ = Describe("retry scope pipeline synthesis", func() {
 
 	DescribeTable("resolveRetryTarget",
 		func(tc testCase) {
-			target, err := resolveRetryTarget(tc.components, tc.component, tc.branch, tc.tag, tc.pipeline)
+			target, err := resolveRetryTarget(tc.components, tc.component, tc.branch, tc.tag, tc.pipeline, "")
 			if tc.wantErrSubstr != "" {
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring(tc.wantErrSubstr))

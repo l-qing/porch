@@ -81,11 +81,14 @@ func runRetry(opts retryOptions) error {
 		return fmt.Errorf("--branch and --tag are mutually exclusive")
 	}
 	componentName := strings.TrimSpace(opts.componentName)
-	pipelineName := strings.TrimSpace(opts.pipelineName)
+	// --pipeline value may carry PAC-style extra args (e.g. "name key=value");
+	// the bare name is used for matching while extra args are appended to the
+	// generated /test comment body.
+	pipelineName, pipelineExtraArgs := config.SplitPipelineArg(opts.pipelineName)
 	if len(prNumbers) > 0 {
-		return runRetryPRMode(ctx, cfg, ghc, opts, componentName, pipelineName, prNumbers, log)
+		return runRetryPRMode(ctx, cfg, ghc, opts, componentName, pipelineName, pipelineExtraArgs, prNumbers, log)
 	}
-	return runRetryBranchMode(ctx, cfg, ghc, opts, componentName, pipelineName, log)
+	return runRetryBranchMode(ctx, cfg, ghc, opts, componentName, pipelineName, pipelineExtraArgs, log)
 }
 
 func runRetryPRMode(
@@ -93,11 +96,11 @@ func runRetryPRMode(
 	cfg config.RuntimeConfig,
 	ghc *gh.Client,
 	opts retryOptions,
-	componentName, pipelineName string,
+	componentName, pipelineName, pipelineExtraArgs string,
 	prNumbers []int,
 	log *logrus.Logger,
 ) error {
-	target, err := resolveRetryTargetForPR(cfg.Components, componentName, pipelineName)
+	target, err := resolveRetryTargetForPR(cfg.Components, componentName, pipelineName, pipelineExtraArgs)
 	if err != nil {
 		return err
 	}
@@ -199,14 +202,14 @@ func runRetryBranchMode(
 	cfg config.RuntimeConfig,
 	ghc *gh.Client,
 	opts retryOptions,
-	componentName, pipelineName string,
+	componentName, pipelineName, pipelineExtraArgs string,
 	log *logrus.Logger,
 ) error {
 	cfg, err := resolvePatternComponents(ctx, cfg, ghc)
 	if err != nil {
 		return err
 	}
-	target, err := resolveRetryTarget(cfg.Components, componentName, strings.TrimSpace(opts.branch), strings.TrimSpace(opts.tag), pipelineName)
+	target, err := resolveRetryTarget(cfg.Components, componentName, strings.TrimSpace(opts.branch), strings.TrimSpace(opts.tag), pipelineName, pipelineExtraArgs)
 	if err != nil {
 		return err
 	}
@@ -296,13 +299,13 @@ func runRetryBranchMode(
 	return nil
 }
 
-func resolveRetryTargetForPR(components []config.LoadedComponent, componentName, pipelineName string) (*config.LoadedComponent, error) {
+func resolveRetryTargetForPR(components []config.LoadedComponent, componentName, pipelineName, pipelineExtraArgs string) (*config.LoadedComponent, error) {
 	selected := matchComponentsBySelector(components, componentName)
 	if len(selected) == 0 {
 		if pipelineName == "" {
 			return nil, fmt.Errorf("component %q not found", componentName)
 		}
-		copy := buildAdHocComponent(componentName, pipelineName, "")
+		copy := buildAdHocComponent(componentName, pipelineName, pipelineExtraArgs, "")
 		return &copy, nil
 	}
 	repo := strings.TrimSpace(selected[0].Repo)
@@ -315,25 +318,25 @@ func resolveRetryTargetForPR(components []config.LoadedComponent, componentName,
 		}
 	}
 	base := selected[0]
-	applyPipelineScopeToRetryTarget(&base, pipelineName)
+	applyPipelineScopeToRetryTarget(&base, pipelineName, pipelineExtraArgs)
 	base.Name = componentName
 	base.Branch = ""
 	return &base, nil
 }
 
-func resolveRetryTarget(components []config.LoadedComponent, componentName, branch, tag, pipelineName string) (*config.LoadedComponent, error) {
+func resolveRetryTarget(components []config.LoadedComponent, componentName, branch, tag, pipelineName, pipelineExtraArgs string) (*config.LoadedComponent, error) {
 	selected := matchComponentsBySelector(components, componentName)
 	if len(selected) == 0 {
 		if pipelineName != "" {
 			ref := firstNonEmpty(tag, branch)
-			copy := buildAdHocComponent(componentName, pipelineName, ref)
+			copy := buildAdHocComponent(componentName, pipelineName, pipelineExtraArgs, ref)
 			return &copy, nil
 		}
 		return nil, fmt.Errorf("component %q not found", componentName)
 	}
 	if tag != "" {
 		copy := withRuntimeComponentRef(selected[0], tag)
-		applyPipelineScopeToRetryTarget(&copy, pipelineName)
+		applyPipelineScopeToRetryTarget(&copy, pipelineName, pipelineExtraArgs)
 		return &copy, nil
 	}
 
@@ -341,14 +344,14 @@ func resolveRetryTarget(components []config.LoadedComponent, componentName, bran
 		for i := range selected {
 			if selected[i].Branch == branch {
 				copy := selected[i]
-				applyPipelineScopeToRetryTarget(&copy, pipelineName)
+				applyPipelineScopeToRetryTarget(&copy, pipelineName, pipelineExtraArgs)
 				return &copy, nil
 			}
 		}
 		if len(selected) == 1 {
 			copy := selected[0]
 			copy.Branch = branch
-			applyPipelineScopeToRetryTarget(&copy, pipelineName)
+			applyPipelineScopeToRetryTarget(&copy, pipelineName, pipelineExtraArgs)
 			return &copy, nil
 		}
 		return nil, fmt.Errorf("branch %q not found under component %q", branch, componentName)
@@ -362,11 +365,14 @@ func resolveRetryTarget(components []config.LoadedComponent, componentName, bran
 		return nil, fmt.Errorf("component %q matches multiple branches %v, please specify --branch/--tag or use component@branch", componentName, choices)
 	}
 	copy := selected[0]
-	applyPipelineScopeToRetryTarget(&copy, pipelineName)
+	applyPipelineScopeToRetryTarget(&copy, pipelineName, pipelineExtraArgs)
 	return &copy, nil
 }
 
-func applyPipelineScopeToRetryTarget(target *config.LoadedComponent, pipelineName string) {
+// applyPipelineScopeToRetryTarget narrows target.Pipelines to the requested
+// pipeline and, when pipelineExtraArgs is non-empty, overrides the
+// RetryCommand so CLI-provided PAC args win over any pre-declared retry_command.
+func applyPipelineScopeToRetryTarget(target *config.LoadedComponent, pipelineName, pipelineExtraArgs string) {
 	if target == nil {
 		return
 	}
@@ -377,11 +383,11 @@ func applyPipelineScopeToRetryTarget(target *config.LoadedComponent, pipelineNam
 	filtered := make([]config.PipelineSpec, 0, 1)
 	for _, p := range target.Pipelines {
 		if p.Name == pipelineName {
-			filtered = append(filtered, config.NormalizePipelineSpec(p))
+			filtered = append(filtered, normalizePipelineSpecForScope(p, pipelineExtraArgs))
 		}
 	}
 	if len(filtered) == 0 {
-		filtered = append(filtered, config.NormalizePipelineSpec(config.PipelineSpec{Name: pipelineName}))
+		filtered = append(filtered, normalizePipelineSpecForScope(config.PipelineSpec{Name: pipelineName}, pipelineExtraArgs))
 	}
 	target.Pipelines = filtered
 }

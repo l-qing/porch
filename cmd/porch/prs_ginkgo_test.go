@@ -204,7 +204,7 @@ var _ = Describe("PR mode helpers", func() {
 
 	DescribeTable("resolveRetryTargetForPR",
 		func(tc retryTargetCase) {
-			target, err := resolveRetryTargetForPR(tc.components, tc.component, tc.pipeline)
+			target, err := resolveRetryTargetForPR(tc.components, tc.component, tc.pipeline, "")
 			if tc.wantErrSubstr != "" {
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring(tc.wantErrSubstr))

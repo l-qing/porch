@@ -615,13 +615,16 @@ func applyWatchScope(cfg *config.RuntimeConfig, opts watchOptions) (bool, error)
 }
 
 func applyWatchPRScope(ctx context.Context, cfg *config.RuntimeConfig, componentName, pipelineName string, prs []int, ghc *gh.Client) error {
+	// The --pipeline flag accepts "<name> [key=value ...]"; the bare name drives
+	// check-run matching while extraArgs are forwarded into the /test comment.
+	pipelineName, extraArgs := config.SplitPipelineArg(pipelineName)
 	selected := matchComponentsBySelector(cfg.Components, componentName)
 	if len(selected) == 0 {
 		if pipelineName == "" {
 			return fmt.Errorf("component %q not found", componentName)
 		}
 		// Ad-hoc mode uses component selector as repo name and requires pipeline to build retry command.
-		selected = []config.LoadedComponent{buildAdHocComponent(componentName, pipelineName, "")}
+		selected = []config.LoadedComponent{buildAdHocComponent(componentName, pipelineName, extraArgs, "")}
 	}
 	repo := strings.TrimSpace(selected[0].Repo)
 	if repo == "" {
@@ -637,12 +640,12 @@ func applyWatchPRScope(ctx context.Context, cfg *config.RuntimeConfig, component
 		filtered := make([]config.PipelineSpec, 0, 1)
 		for _, p := range base.Pipelines {
 			if p.Name == pipelineName {
-				filtered = append(filtered, config.NormalizePipelineSpec(p))
+				filtered = append(filtered, normalizePipelineSpecForScope(p, extraArgs))
 			}
 		}
 		if len(filtered) == 0 {
 			// Allow one-off scoped execution even when pipeline is not pre-declared in config.
-			filtered = append(filtered, config.NormalizePipelineSpec(config.PipelineSpec{Name: pipelineName}))
+			filtered = append(filtered, normalizePipelineSpecForScope(config.PipelineSpec{Name: pipelineName}, extraArgs))
 		}
 		base.Pipelines = filtered
 	}
@@ -677,7 +680,9 @@ func applyWatchPRScope(ctx context.Context, cfg *config.RuntimeConfig, component
 
 func applyWatchScopeWithBranchLister(ctx context.Context, cfg *config.RuntimeConfig, opts watchOptions, lister branchLister) (bool, error) {
 	componentName := strings.TrimSpace(opts.componentName)
-	pipelineName := strings.TrimSpace(opts.pipelineName)
+	// --pipeline value may carry PAC-style extra args (e.g. "name key=value");
+	// only the bare name is used for matching, args are appended to retry comments.
+	pipelineName, pipelineExtraArgs := config.SplitPipelineArg(opts.pipelineName)
 	branch := strings.TrimSpace(opts.branch)
 	tag := strings.TrimSpace(opts.tag)
 	branchPattern := strings.TrimSpace(opts.branchPattern)
@@ -743,7 +748,7 @@ func applyWatchScopeWithBranchLister(ctx context.Context, cfg *config.RuntimeCon
 			selected = make([]config.LoadedComponent, 0, len(matched))
 			multi := len(matched) > 1
 			for _, current := range matched {
-				adHoc := buildAdHocComponent(componentName, pipelineName, current)
+				adHoc := buildAdHocComponent(componentName, pipelineName, pipelineExtraArgs, current)
 				if multi {
 					adHoc.Name = fmt.Sprintf("%s@%s", componentName, current)
 				}
@@ -751,7 +756,7 @@ func applyWatchScopeWithBranchLister(ctx context.Context, cfg *config.RuntimeCon
 			}
 		} else {
 			ref := firstNonEmpty(tag, branch)
-			selected = []config.LoadedComponent{buildAdHocComponent(componentName, pipelineName, ref)}
+			selected = []config.LoadedComponent{buildAdHocComponent(componentName, pipelineName, pipelineExtraArgs, ref)}
 		}
 	}
 	if tag != "" {
@@ -793,12 +798,12 @@ func applyWatchScopeWithBranchLister(ctx context.Context, cfg *config.RuntimeCon
 			filtered := make([]config.PipelineSpec, 0, 1)
 			for _, p := range selected[i].Pipelines {
 				if p.Name == pipelineName {
-					filtered = append(filtered, config.NormalizePipelineSpec(p))
+					filtered = append(filtered, normalizePipelineSpecForScope(p, pipelineExtraArgs))
 				}
 			}
 			if len(filtered) == 0 {
 				// Keep scoped runs lightweight: synthesize a default retry command from CLI args.
-				filtered = append(filtered, config.NormalizePipelineSpec(config.PipelineSpec{Name: pipelineName}))
+				filtered = append(filtered, normalizePipelineSpecForScope(config.PipelineSpec{Name: pipelineName}, pipelineExtraArgs))
 			}
 			selected[i].Pipelines = filtered
 		}
