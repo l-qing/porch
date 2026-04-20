@@ -107,6 +107,9 @@ const (
 	eventCommitURL      watchEventKind = "COMMIT_URL"
 	eventAllOK          watchEventKind = "ALL_OK"
 	eventScopeOK        watchEventKind = "SCOPE_OK"
+	// eventRetryAdopted fires when a newer HEAD commit already has an active
+	// pipeline run, so porch adopts it instead of posting a retry comment.
+	eventRetryAdopted watchEventKind = "RETRY_ADOPTED"
 )
 
 const runMismatchRetryThreshold = 3
@@ -1889,11 +1892,23 @@ func triggerRetry(
 	dryRun bool,
 	emit func(kind watchEventKind, msg string, fields logrus.Fields),
 ) error {
+	oldSHA := c.SHA
 	sha, err := refreshRuntimeSHA(ctx, ghc, c)
 	if err != nil {
 		return fmt.Errorf("refresh runtime sha: %w", err)
 	}
 	c.SHA = sha
+
+	// If the branch HEAD advanced to a new commit, probe whether that commit
+	// already has an active (running or succeeded) pipeline run.  If it does,
+	// adopt it instead of posting a retry comment — otherwise the comment would
+	// trigger yet another run and cancel the one that is already in flight.
+	if sha != oldSHA {
+		if adopted := tryAdoptHeadRun(ctx, ghc, cfg, c, p, sha, oldSHA, dryRun, emit); adopted {
+			return nil
+		}
+	}
+
 	body := strings.ReplaceAll(p.RetryCmd, "{branch}", c.Branch)
 	attempt := p.RetryCount + 1
 	if dryRun {
@@ -1912,6 +1927,75 @@ func triggerRetry(
 	p.LastTransitionAt = nil
 	return nil
 }
+
+// tryAdoptHeadRun checks whether the pipeline already has an active run on the
+// new HEAD commit.  When it does, porch transitions to Settling so the existing
+// run gets rediscovered naturally — no retry comment is posted and RetryCount
+// is not incremented because this is a branch-advance, not a real retry.
+// Returns true when adoption succeeded (caller must skip the comment path).
+func tryAdoptHeadRun(
+	ctx context.Context,
+	ghc *gh.Client,
+	cfg config.RuntimeConfig,
+	c *trackedComponent,
+	p *trackedPipeline,
+	newSHA, oldSHA string,
+	dryRun bool,
+	emit func(kind watchEventKind, msg string, fields logrus.Fields),
+) bool {
+	runs, err := ghc.CheckRuns(ctx, c.Repo, newSHA)
+	if err != nil {
+		// A probe failure must never block the retry — fall back to comment path.
+		emit(eventQueryWarn, fmt.Sprintf("%s/%s head-probe failed, will retry via comment: %v", c.Name, p.Name, err),
+			logrus.Fields{"component": c.Name, "branch": c.Branch, "pipeline": p.Name, "sha": newSHA})
+		return false
+	}
+
+	cr, ok := component.FindPipelineCheckRun(runs, p.Name)
+	if !ok {
+		// No check-run on the new commit yet — fall through to comment retry.
+		return false
+	}
+
+	probe := watcher.ProbeFromCheckRun(cr.Status, cr.Conclusion)
+	if probe.Status != pipestatus.StatusRunning && probe.Status != pipestatus.StatusSucceeded {
+		// New commit's pipeline already failed — let the comment retry proceed.
+		return false
+	}
+
+	// Adopt: parse the new run name from the check-run details URL.
+	ns, run, _ := component.ParseDetailsURLForPipeline(cr.DetailsURL, p.Name)
+
+	adoptFields := logrus.Fields{
+		"component": c.Name, "branch": c.Branch, "pipeline": p.Name,
+		"old_sha": oldSHA, "new_sha": newSHA, "new_run": run, "reason": "branch_advanced",
+	}
+	emit(eventRetryAdopted, fmt.Sprintf("%s/%s adopted new run %s on %s", c.Name, p.Name, run, shortSHA(newSHA)), adoptFields)
+
+	if dryRun {
+		// In dry-run mode report the adoption but leave pipeline state unchanged.
+		return true
+	}
+
+	// Transition to Settling so the main loop rediscovers the run and emits
+	// eventRetryOK once it confirms the new PipelineRun exists — this also
+	// resets timing fields without incrementing RetryCount.
+	if ns != "" {
+		p.Namespace = ns
+	}
+	if run != "" {
+		p.PipelineRun = run
+	}
+	settleAfter := time.Now().Add(cfg.Root.Retry.RetrySettleDelay.Duration)
+	p.SettleAfter = &settleAfter
+	p.RetryAfter = nil
+	p.Status = pipestatus.StatusSettling
+	p.StartedAt = nil
+	p.CompletedAt = nil
+	p.LastTransitionAt = nil
+	return true
+}
+
 
 func retryDryTarget(c *trackedComponent, sha string) string {
 	if c.PRNumber > 0 {

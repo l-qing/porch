@@ -45,6 +45,10 @@ var _ = Describe("watchOnce retry comment target", func() {
 				if joined == "api repos/TestGroup/catalog/pulls/101" {
 					return []byte(`{"number":101,"state":"open","head":{"ref":"feat/a","sha":"abc123"}}`), nil, nil
 				}
+				// Head-probe: no active run on the new commit, fall through to comment.
+				if joined == "api repos/TestGroup/catalog/commits/abc123/check-runs" {
+					return []byte(`{"check_runs":[]}`), nil, nil
+				}
 				return nil, nil, nil
 			}})
 
@@ -98,6 +102,8 @@ var _ = Describe("watchOnce retry comment target", func() {
 			prNumber:    0,
 			expectCalls: []string{
 				"api repos/TestGroup/catalog/commits/feat%2Fa",
+				// Head-probe for new SHA — returns empty, so comment retry proceeds.
+				"api repos/TestGroup/catalog/commits/abc123/check-runs",
 				"api repos/TestGroup/catalog/commits/abc123/comments -f body=/test catalog-all-in-one branch:feat/a",
 			},
 		}),
@@ -106,6 +112,8 @@ var _ = Describe("watchOnce retry comment target", func() {
 			prNumber:    101,
 			expectCalls: []string{
 				"api repos/TestGroup/catalog/pulls/101",
+				// Head-probe for new SHA — returns empty, so comment retry proceeds.
+				"api repos/TestGroup/catalog/commits/abc123/check-runs",
 				"api repos/TestGroup/catalog/issues/101/comments -f body=/test catalog-all-in-one branch:feat/a",
 			},
 		}),
