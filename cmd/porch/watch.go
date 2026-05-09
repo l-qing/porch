@@ -73,41 +73,42 @@ type watchOptions struct {
 type watchEventKind string
 
 const (
-	eventRecoverSkip    watchEventKind = "RECOVER_SKIP"
-	eventRecover        watchEventKind = "RECOVER"
-	eventRecoverWarn    watchEventKind = "RECOVER_WARN"
-	eventStateFile      watchEventKind = "STATE_FILE"
-	eventInit           watchEventKind = "INIT"
-	eventProbeMode      watchEventKind = "PROBE_MODE"
-	eventScope          watchEventKind = "SCOPE"
-	eventFinalDisabled  watchEventKind = "FINAL_DISABLED"
-	eventWatchErr       watchEventKind = "WATCH_ERR"
-	eventNotifyErr      watchEventKind = "NOTIFY_ERR"
-	eventScopeDone      watchEventKind = "SCOPE_DONE"
-	eventAllDone        watchEventKind = "ALL_DONE"
-	eventFinalResident  watchEventKind = "FINAL_RESIDENT"
-	eventFinalErr       watchEventKind = "FINAL_ERR"
-	eventDryFinal       watchEventKind = "DRY_FINAL"
-	eventFinalOK        watchEventKind = "FINAL_OK"
-	eventStateErr       watchEventKind = "STATE_ERR"
-	eventNotifyProgress watchEventKind = "NOTIFY_PROGRESS"
-	eventTimeout        watchEventKind = "TIMEOUT"
-	eventExit           watchEventKind = "EXIT"
-	eventDryRetry       watchEventKind = "DRY_RETRY"
-	eventRetryOK        watchEventKind = "RETRY_OK"
-	eventGHFallback     watchEventKind = "GH_FALLBACK"
-	eventHeadUpdate     watchEventKind = "HEAD_UPDATE"
-	eventRunMismatch    watchEventKind = "RUN_MISMATCH"
-	eventRunStale       watchEventKind = "RUN_STALE"
-	eventSuccess        watchEventKind = "SUCCESS"
-	eventQueryWarn      watchEventKind = "QUERY_WARN"
-	eventQueryErr       watchEventKind = "QUERY_ERR"
-	eventExhausted      watchEventKind = "EXHAUSTED"
-	eventFailed         watchEventKind = "FAILED"
-	eventRetrying       watchEventKind = "RETRYING"
-	eventCommitURL      watchEventKind = "COMMIT_URL"
-	eventAllOK          watchEventKind = "ALL_OK"
-	eventScopeOK        watchEventKind = "SCOPE_OK"
+	eventRecoverSkip        watchEventKind = "RECOVER_SKIP"
+	eventRecover            watchEventKind = "RECOVER"
+	eventRecoverWarn        watchEventKind = "RECOVER_WARN"
+	eventStateFile          watchEventKind = "STATE_FILE"
+	eventInit               watchEventKind = "INIT"
+	eventProbeMode          watchEventKind = "PROBE_MODE"
+	eventScope              watchEventKind = "SCOPE"
+	eventFinalDisabled      watchEventKind = "FINAL_DISABLED"
+	eventWatchErr           watchEventKind = "WATCH_ERR"
+	eventNotifyErr          watchEventKind = "NOTIFY_ERR"
+	eventScopeDone          watchEventKind = "SCOPE_DONE"
+	eventAllDone            watchEventKind = "ALL_DONE"
+	eventFinalResident      watchEventKind = "FINAL_RESIDENT"
+	eventFinalErr           watchEventKind = "FINAL_ERR"
+	eventDryFinal           watchEventKind = "DRY_FINAL"
+	eventFinalOK            watchEventKind = "FINAL_OK"
+	eventStateErr           watchEventKind = "STATE_ERR"
+	eventNotifyProgress     watchEventKind = "NOTIFY_PROGRESS"
+	eventNotifyProgressSkip watchEventKind = "NOTIFY_PROGRESS_SKIP"
+	eventTimeout            watchEventKind = "TIMEOUT"
+	eventExit               watchEventKind = "EXIT"
+	eventDryRetry           watchEventKind = "DRY_RETRY"
+	eventRetryOK            watchEventKind = "RETRY_OK"
+	eventGHFallback         watchEventKind = "GH_FALLBACK"
+	eventHeadUpdate         watchEventKind = "HEAD_UPDATE"
+	eventRunMismatch        watchEventKind = "RUN_MISMATCH"
+	eventRunStale           watchEventKind = "RUN_STALE"
+	eventSuccess            watchEventKind = "SUCCESS"
+	eventQueryWarn          watchEventKind = "QUERY_WARN"
+	eventQueryErr           watchEventKind = "QUERY_ERR"
+	eventExhausted          watchEventKind = "EXHAUSTED"
+	eventFailed             watchEventKind = "FAILED"
+	eventRetrying           watchEventKind = "RETRYING"
+	eventCommitURL          watchEventKind = "COMMIT_URL"
+	eventAllOK              watchEventKind = "ALL_OK"
+	eventScopeOK            watchEventKind = "SCOPE_OK"
 	// eventRetryAdopted fires when a newer HEAD commit already has an active
 	// pipeline run, so porch adopts it instead of posting a retry comment.
 	eventRetryAdopted watchEventKind = "RETRY_ADOPTED"
@@ -271,6 +272,10 @@ func runWatch(opts watchOptions) error {
 	// whenever the component flips back to in-flight (e.g., a new commit
 	// triggers a fresh pipeline run), so the next success can re-fire.
 	succeededReported := map[string]time.Time{}
+	// progressSignatures caches the last signature already covered by a progress
+	// notification per pipeline. Used to filter unchanged rows out of subsequent
+	// progress reports when ProgressChangesOnlyEnabled is true.
+	progressSignatures := map[string]string{}
 	finalDisabledResident := false
 	emit := func(kind watchEventKind, msg string, fields logrus.Fields) {
 		logEvent(log, string(kind), msg, fields)
@@ -352,13 +357,26 @@ func runWatch(opts watchOptions) error {
 
 		// Re-activation handling: drop any previously-reported components that
 		// are no longer in Succeeded state (typically a new commit triggered a
-		// fresh run) and rearm the global summary if needed.
+		// fresh run) and rearm the global summary if needed. Reactivated names
+		// are captured before eviction so the progress-signature cache can be
+		// cleaned in lockstep — guaranteeing a re-activated component shows up
+		// in the very next progress report.
+		reactivated := reactivatedFromSuccess(succeededReported, tracked)
 		evictReactivatedSuccess(succeededReported, tracked)
+		evictProgressSignaturesForComponents(progressSignatures, reactivated)
+		// Drop signatures whose component / pipeline left tracked between
+		// ticks (branch_patterns drift, runtime removal). Cheap O(|sig|) sweep
+		// keeps the cache from growing unboundedly across a long-lived watch.
+		pruneProgressSignaturesNotTracked(progressSignatures, tracked)
 		if !allSucceeded && allSucceededNotified {
 			allSucceededNotified = false
 		}
 
 		notifyComponentFirstSuccesses(context.Background(), wecom, cfg, tracked, succeededReported, startedAt, notifyRowsPerMessage, emit)
+		// Seed signatures for every component that just received (or previously
+		// received) a per-component success notification so the progress
+		// channel does not echo the same rows on the next tick.
+		seedProgressSignaturesForNotified(progressSignatures, tracked, succeededReported)
 
 		if allSucceeded && !allSucceededNotified {
 			now := time.Now().UTC()
@@ -445,12 +463,33 @@ func runWatch(opts watchOptions) error {
 			} else {
 				progressRows = toRows(tracked, cfg.Root.Connection)
 			}
-			// Skip the progress notification when nothing is in flight; the
-			// per-component success notifications already covered everything.
+			changesOnly := cfg.Root.Notification.ProgressChangesOnlyEnabled()
+			totalRows := len(progressRows)
+			if changesOnly {
+				progressRows = filterChangedRows(progressRows, tracked, progressSignatures)
+			}
+			// Skip the progress notification when no row qualifies — either
+			// nothing is in flight, or nothing changed since the last report.
 			// lastProgressAt is still advanced so we don't retry next tick.
+			// When changesOnly suppressed an otherwise non-empty row set, leave
+			// a local-only event in the log so operators are not staring at a
+			// silent watch and wondering whether it has stalled.
+			if changesOnly && len(progressRows) == 0 && totalRows > 0 {
+				emit(eventNotifyProgressSkip, fmt.Sprintf("progress report skipped: no pipeline changed since last tick elapsed=%s done=%d/%d in_flight=%d", time.Since(startedAt).Truncate(time.Second), doneCount, totalCount, totalRows), nil)
+			}
 			if len(progressRows) > 0 {
-				emit(eventNotifyProgress, fmt.Sprintf("sending progress report elapsed=%s done=%d/%d rows=%d", time.Since(startedAt).Truncate(time.Second), doneCount, totalCount, len(progressRows)), nil)
-				if err := notifyMarkdownInChunks(context.Background(), wecom, notify.EventProgressReport, progressRows, notifyRowsPerMessage, func(chunk []tui.Row, page, total int) string {
+				if changesOnly {
+					emit(eventNotifyProgress, fmt.Sprintf("sending progress report elapsed=%s done=%d/%d changed=%d/%d", time.Since(startedAt).Truncate(time.Second), doneCount, totalCount, len(progressRows), totalRows), nil)
+				} else {
+					emit(eventNotifyProgress, fmt.Sprintf("sending progress report elapsed=%s done=%d/%d rows=%d", time.Since(startedAt).Truncate(time.Second), doneCount, totalCount, len(progressRows)), nil)
+				}
+				// Pass nil sig when changesOnly is disabled so notifyAndCommitProgress
+				// degenerates to a plain send.
+				sigForCommit := progressSignatures
+				if !changesOnly {
+					sigForCommit = nil
+				}
+				if err := notifyAndCommitProgress(context.Background(), wecom, notifyRowsPerMessage, progressRows, tracked, sigForCommit, func(chunk []tui.Row, page, total int) string {
 					return buildProgressMarkdown(chunk, startedAt, time.Now().UTC(), page, total, doneCount, totalCount)
 				}); err != nil {
 					emit(eventNotifyErr, err.Error(), logrus.Fields{"error": err.Error()})
@@ -1595,6 +1634,200 @@ func evictReactivatedSuccess(notified map[string]time.Time, tracked map[string]*
 	return evicted
 }
 
+// reactivatedFromSuccess returns the names of components currently tracked in
+// `notified` that no longer report a fully-Succeeded state. Used as a shared
+// predicate so both succeeded-set eviction and progress-signature cleanup pivot
+// off the exact same set of components per tick.
+func reactivatedFromSuccess(notified map[string]time.Time, tracked map[string]*trackedComponent) []string {
+	if len(notified) == 0 {
+		return nil
+	}
+	var names []string
+	for name := range notified {
+		c, ok := tracked[name]
+		if !ok || !componentSucceeded(c) {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// pipelineProgressKey is the stable map key used by the progress-signature
+// cache. Component name plus pipeline name is unique within a watch session.
+func pipelineProgressKey(component, pipeline string) string {
+	return component + "/" + pipeline
+}
+
+// pipelineProgressSignature encodes the fields whose change should re-surface
+// a pipeline in the next progress notification. RetryCount and RunMismatch are
+// included separately because they may advance without a Status transition.
+// PipelineRun catches HEAD swaps where the new run starts in the same Status as
+// the previous one; LastTransitionAt covers everything else.
+//
+// Each string field is wrapped with %q so a literal '|' inside any of them
+// (theoretically impossible for Tekton object names today, but cheap to guard
+// against) cannot collide with the field separator and produce a false-positive
+// equal signature.
+func pipelineProgressSignature(p *trackedPipeline) string {
+	if p == nil {
+		return ""
+	}
+	transition := ""
+	if p.LastTransitionAt != nil {
+		transition = p.LastTransitionAt.UTC().Format(time.RFC3339Nano)
+	}
+	return fmt.Sprintf("%q|%q|%d|%d|%q|%q",
+		string(p.Status),
+		string(p.Conclusion),
+		p.RetryCount,
+		p.RunMismatch,
+		p.PipelineRun,
+		transition,
+	)
+}
+
+// filterChangedRows returns only the rows whose pipeline's current signature
+// differs from the value previously committed to `sig`. The map itself is not
+// modified — callers commit signatures explicitly after a successful send so a
+// failed notification does not silently mark rows as already-reported.
+//
+// Rows whose component or pipeline is not present in `tracked` are dropped
+// rather than passed through. The progressRows set is built from `tracked`
+// inside the same processTick, so a missing entry here would be a programmer
+// error; matching commitProgressSignatures' skip-on-missing behavior keeps the
+// two helpers from drifting (a passed-through row would otherwise re-notify
+// every tick because commit can never record its signature).
+func filterChangedRows(rows []tui.Row, tracked map[string]*trackedComponent, sig map[string]string) []tui.Row {
+	if len(rows) == 0 {
+		return rows
+	}
+	out := make([]tui.Row, 0, len(rows))
+	for _, r := range rows {
+		c, ok := tracked[r.Component]
+		if !ok {
+			continue
+		}
+		p, ok := c.Pipelines[r.Pipeline]
+		if !ok {
+			continue
+		}
+		key := pipelineProgressKey(r.Component, r.Pipeline)
+		if sig[key] != pipelineProgressSignature(p) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// commitProgressSignatures records the current signature of every pipeline
+// represented in `rows`. Called after the progress notification has been
+// dispatched (success or failure) so the same content does not retransmit on
+// the next tick.
+func commitProgressSignatures(rows []tui.Row, tracked map[string]*trackedComponent, sig map[string]string) {
+	if sig == nil {
+		return
+	}
+	for _, r := range rows {
+		c, ok := tracked[r.Component]
+		if !ok {
+			continue
+		}
+		p, ok := c.Pipelines[r.Pipeline]
+		if !ok {
+			continue
+		}
+		sig[pipelineProgressKey(r.Component, r.Pipeline)] = pipelineProgressSignature(p)
+	}
+}
+
+// notifyAndCommitProgress sends `progressRows` as a progress report and then
+// commits their signatures — even when the wecom call returned an error. A
+// transient delivery failure should not cause the same content to retransmit
+// next tick; real state changes still re-surface via filterChangedRows. When
+// `sig` is nil the commit becomes a no-op, which is how callers degrade the
+// helper to a plain send under ProgressChangesOnly=false.
+func notifyAndCommitProgress(
+	ctx context.Context,
+	wecom *notify.Wecom,
+	rowsPerMessage int,
+	progressRows []tui.Row,
+	tracked map[string]*trackedComponent,
+	sig map[string]string,
+	build func(chunk []tui.Row, page, total int) string,
+) error {
+	err := notifyMarkdownInChunks(ctx, wecom, notify.EventProgressReport, progressRows, rowsPerMessage, build)
+	commitProgressSignatures(progressRows, tracked, sig)
+	return err
+}
+
+// pruneProgressSignaturesNotTracked drops any signature whose component or
+// pipeline is no longer present in `tracked`. Without this the cache would
+// retain stale entries forever when branch_patterns rematch falls off, a
+// component is removed at runtime, or a pipeline is renamed mid-run. Bounded
+// in practice by `len(tracked)*pipelines/component`, but cheaper to evict
+// proactively than to debug later.
+func pruneProgressSignaturesNotTracked(sig map[string]string, tracked map[string]*trackedComponent) {
+	if len(sig) == 0 {
+		return
+	}
+	for key := range sig {
+		idx := strings.IndexByte(key, '/')
+		if idx <= 0 || idx >= len(key)-1 {
+			delete(sig, key)
+			continue
+		}
+		comp := key[:idx]
+		pipe := key[idx+1:]
+		c, ok := tracked[comp]
+		if !ok {
+			delete(sig, key)
+			continue
+		}
+		if _, ok := c.Pipelines[pipe]; !ok {
+			delete(sig, key)
+		}
+	}
+}
+
+// evictProgressSignaturesForComponents removes every signature entry whose
+// component appears in `names`. Pairs with reactivatedFromSuccess so that a
+// component flipping back to in-flight is guaranteed to surface in the next
+// progress notification, even if its pipeline somehow rebuilds the same
+// signature string.
+func evictProgressSignaturesForComponents(sig map[string]string, names []string) {
+	if len(sig) == 0 || len(names) == 0 {
+		return
+	}
+	for _, name := range names {
+		prefix := name + "/"
+		for key := range sig {
+			if strings.HasPrefix(key, prefix) {
+				delete(sig, key)
+			}
+		}
+	}
+}
+
+// seedProgressSignaturesForNotified copies the current signature of every
+// pipeline of every component that has already received a per-component
+// first-success notification into `sig`. This keeps the progress channel from
+// re-listing rows that the per-component success channel just covered, even
+// when SuppressSucceededInProgress is disabled.
+func seedProgressSignaturesForNotified(sig map[string]string, tracked map[string]*trackedComponent, notified map[string]time.Time) {
+	if sig == nil || len(notified) == 0 {
+		return
+	}
+	for name := range notified {
+		c, ok := tracked[name]
+		if !ok {
+			continue
+		}
+		for _, p := range c.Pipelines {
+			sig[pipelineProgressKey(name, p.Name)] = pipelineProgressSignature(p)
+		}
+	}
+}
+
 // notifyComponentFirstSuccesses emits a Wecom markdown notification for every
 // component that just transitioned into a fully-Succeeded state and was not
 // already in the notified set. Iteration is sorted by component name so the
@@ -2185,7 +2418,6 @@ func tryAdoptHeadRun(
 	p.LastTransitionAt = nil
 	return true
 }
-
 
 func retryDryTarget(c *trackedComponent, sha string) string {
 	if c.PRNumber > 0 {

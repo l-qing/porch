@@ -316,7 +316,7 @@ components:
 `notification.events` 按事件名控制发送类型，当前支持：
 
 - `all_succeeded`：所有组件成功完成后的最终通知
-- `progress_report`：按 `notification.progress_interval` 周期发送进度快照
+- `progress_report`：按 `notification.progress_interval` 周期发送进度快照（默认开启增量模式：仅推送签名变化的 pipeline，本周期无变更时整条通知不发，仅在本地日志写一条 `NOTIFY_PROGRESS_SKIP`）
 - `component_exhausted`：某组件重试耗尽
 - `global_timeout`：全局超时（可选，通常与终端 `TIMEOUT` 日志重复）
 
@@ -338,6 +338,7 @@ notification:
     # - global_timeout
   progress_interval: 30m
   notify_rows_per_message: 12
+  # progress_changes_only: true        # 默认 true：仅推送本周期签名变化的 pipeline；置 false 回退老的全量快照行为
 ```
 
 ## 注意事项
