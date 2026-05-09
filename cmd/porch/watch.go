@@ -265,6 +265,11 @@ func runWatch(opts watchOptions) error {
 	finalTriggered := false
 	var finalTriggeredAt *time.Time
 	allSucceededNotified := false
+	// First-success notifications are one-shot per component. The map is also
+	// used as a "hide from progress / terminal" filter; entries are evicted
+	// whenever the component flips back to in-flight (e.g., a new commit
+	// triggers a fresh pipeline run), so the next success can re-fire.
+	succeededReported := map[string]time.Time{}
 	finalDisabledResident := false
 	emit := func(kind watchEventKind, msg string, fields logrus.Fields) {
 		logEvent(log, string(kind), msg, fields)
@@ -343,6 +348,17 @@ func runWatch(opts watchOptions) error {
 
 		allSucceeded := allComponentsSucceeded(tracked)
 		rows := toRows(tracked, cfg.Root.Connection)
+
+		// Re-activation handling: drop any previously-reported components that
+		// are no longer in Succeeded state (typically a new commit triggered a
+		// fresh run) and rearm the global summary if needed.
+		evictReactivatedSuccess(succeededReported, tracked)
+		if !allSucceeded && allSucceededNotified {
+			allSucceededNotified = false
+		}
+
+		notifyComponentFirstSuccesses(context.Background(), wecom, cfg, tracked, succeededReported, startedAt, notifyRowsPerMessage, emit)
+
 		if allSucceeded && !allSucceededNotified {
 			now := time.Now().UTC()
 			kind := eventAllOK
@@ -417,16 +433,38 @@ func runWatch(opts watchOptions) error {
 		if err := store.Save(buildState(startedAt, tracked, finalTriggered, finalTriggeredAt)); err != nil {
 			emit(eventStateErr, err.Error(), logrus.Fields{"error": err.Error()})
 		}
+		suppressSucceeded := cfg.Root.Notification.SuppressSucceededInProgressEnabled()
+		doneCount := len(succeededReported)
+		totalCount := len(tracked)
+
 		if pi := cfg.Root.Notification.ProgressInterval.Duration; pi > 0 && time.Since(lastProgressAt) >= pi {
-			emit(eventNotifyProgress, fmt.Sprintf("sending progress report elapsed=%s", time.Since(startedAt).Truncate(time.Second)), nil)
-			if err := notifyMarkdownInChunks(context.Background(), wecom, notify.EventProgressReport, toRows(tracked, cfg.Root.Connection), notifyRowsPerMessage, func(chunk []tui.Row, page, total int) string {
-				return buildProgressMarkdown(chunk, startedAt, time.Now().UTC(), page, total)
-			}); err != nil {
-				emit(eventNotifyErr, err.Error(), logrus.Fields{"error": err.Error()})
+			var progressRows []tui.Row
+			if suppressSucceeded {
+				progressRows = inFlightRows(tracked, cfg.Root.Connection, succeededReported)
+			} else {
+				progressRows = toRows(tracked, cfg.Root.Connection)
+			}
+			// Skip the progress notification when nothing is in flight; the
+			// per-component success notifications already covered everything.
+			// lastProgressAt is still advanced so we don't retry next tick.
+			if len(progressRows) > 0 {
+				emit(eventNotifyProgress, fmt.Sprintf("sending progress report elapsed=%s done=%d/%d rows=%d", time.Since(startedAt).Truncate(time.Second), doneCount, totalCount, len(progressRows)), nil)
+				if err := notifyMarkdownInChunks(context.Background(), wecom, notify.EventProgressReport, progressRows, notifyRowsPerMessage, func(chunk []tui.Row, page, total int) string {
+					return buildProgressMarkdown(chunk, startedAt, time.Now().UTC(), page, total, doneCount, totalCount)
+				}); err != nil {
+					emit(eventNotifyErr, err.Error(), logrus.Fields{"error": err.Error()})
+				}
 			}
 			lastProgressAt = time.Now()
 		}
-		renderer.Render(toRows(tracked, cfg.Root.Connection))
+		// Terminal renderer mirrors the notification filter so the live table
+		// shrinks as components finish. Event history (renderer.AddEvent) is
+		// untouched, so users still see the SUCCESS log entries.
+		if suppressSucceeded {
+			renderer.Render(inFlightRows(tracked, cfg.Root.Connection, succeededReported))
+		} else {
+			renderer.Render(toRows(tracked, cfg.Root.Connection))
+		}
 		return false, nil
 	}
 
@@ -1485,6 +1523,127 @@ func isTerminal(status pipestatus.Status) bool {
 	}
 }
 
+// componentSucceeded reports whether every pipeline of c has reached Succeeded.
+// An empty Pipelines map yields false so a not-yet-populated component is never
+// treated as successful.
+func componentSucceeded(c *trackedComponent) bool {
+	if c == nil || len(c.Pipelines) == 0 {
+		return false
+	}
+	for _, p := range c.Pipelines {
+		if p.Status != pipestatus.StatusSucceeded {
+			return false
+		}
+	}
+	return true
+}
+
+// componentStartedAt returns the earliest StartedAt across c's pipelines, or
+// fallback when no pipeline reported a start time yet (defensive — should be
+// rare, but keeps the success notification's elapsed value sensible).
+func componentStartedAt(c *trackedComponent, fallback time.Time) time.Time {
+	var earliest time.Time
+	for _, p := range c.Pipelines {
+		if p.StartedAt == nil {
+			continue
+		}
+		if earliest.IsZero() || p.StartedAt.Before(earliest) {
+			earliest = *p.StartedAt
+		}
+	}
+	if earliest.IsZero() {
+		return fallback
+	}
+	return earliest
+}
+
+// componentCompletedAt returns the latest CompletedAt across c's pipelines, or
+// time.Now().UTC() when none is set (defensive — succeededMap should guarantee
+// CompletedAt was filled in by watchOnce, but new code paths may forget).
+func componentCompletedAt(c *trackedComponent) time.Time {
+	var latest time.Time
+	for _, p := range c.Pipelines {
+		if p.CompletedAt == nil {
+			continue
+		}
+		if latest.IsZero() || p.CompletedAt.After(latest) {
+			latest = *p.CompletedAt
+		}
+	}
+	if latest.IsZero() {
+		return time.Now().UTC()
+	}
+	return latest
+}
+
+// evictReactivatedSuccess drops components from the notified set whose state
+// no longer matches Succeeded. Returns the number of evictions for callers /
+// tests that care about the count.
+func evictReactivatedSuccess(notified map[string]time.Time, tracked map[string]*trackedComponent) int {
+	if len(notified) == 0 {
+		return 0
+	}
+	evicted := 0
+	for name := range notified {
+		c, ok := tracked[name]
+		if !ok || !componentSucceeded(c) {
+			delete(notified, name)
+			evicted++
+		}
+	}
+	return evicted
+}
+
+// notifyComponentFirstSuccesses emits a Wecom markdown notification for every
+// component that just transitioned into a fully-Succeeded state and was not
+// already in the notified set. Iteration is sorted by component name so the
+// chunked Wecom delivery order is deterministic per tick. Notified components
+// are recorded with their finished timestamp so subsequent ticks skip them
+// until evictReactivatedSuccess drops them.
+func notifyComponentFirstSuccesses(
+	ctx context.Context,
+	wecom *notify.Wecom,
+	cfg config.RuntimeConfig,
+	tracked map[string]*trackedComponent,
+	notified map[string]time.Time,
+	startedAt time.Time,
+	rowsPerMessage int,
+	emit func(kind watchEventKind, msg string, fields logrus.Fields),
+) {
+	if !cfg.Root.Notification.NotifyComponentSuccessEnabled() {
+		return
+	}
+	names := make([]string, 0, len(tracked))
+	for name := range tracked {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if _, already := notified[name]; already {
+			continue
+		}
+		c := tracked[name]
+		if !componentSucceeded(c) {
+			continue
+		}
+		finished := componentCompletedAt(c)
+		started := componentStartedAt(c, startedAt)
+		crows := componentRows(c, cfg.Root.Connection)
+		emit(eventSuccess, fmt.Sprintf("notify component succeeded: %s elapsed=%s", name, finished.Sub(started).Truncate(time.Second)), logrus.Fields{
+			"component": name,
+			"branch":    c.Branch,
+			"started":   started.Format(time.RFC3339),
+			"finished":  finished.Format(time.RFC3339),
+		})
+		if err := notifyMarkdownInChunks(ctx, wecom, notify.EventComponentSucceeded, crows, rowsPerMessage, func(chunk []tui.Row, page, total int) string {
+			return buildComponentSuccessMarkdown(name, c.Branch, started, finished, chunk, page, total)
+		}); err != nil {
+			emit(eventNotifyErr, err.Error(), logrus.Fields{"error": err.Error(), "component": name})
+		}
+		notified[name] = finished
+	}
+}
+
 func succeededMap(tracked map[string]*trackedComponent) map[string]bool {
 	out := map[string]bool{}
 	for _, c := range tracked {
@@ -1622,24 +1781,54 @@ func firstNamespace(pipelines map[string]*trackedPipeline) string {
 }
 
 func toRows(tracked map[string]*trackedComponent, conn config.Connection) []tui.Row {
-	org := conn.GitHubOrg
 	now := time.Now().UTC()
 	rows := []tui.Row{}
 	for _, c := range tracked {
-		for _, p := range c.Pipelines {
-			rows = append(rows, tui.Row{
-				Component: c.Name,
-				Branch:    c.Branch,
-				Pipeline:  p.Name,
-				Status:    p.Status,
-				Retries:   p.RetryCount,
-				Elapsed:   pipelineElapsedText(p.StartedAt, p.CompletedAt, p.LastTransitionAt, p.Status, now),
-				Run:       normalize(p.PipelineRun),
-				RunURL:    pipelineRunDetailURL(p.Namespace, p.PipelineRun, conn),
-				CommitURL: commitChecksURL(org, c.Repo, c.SHA),
-				BranchURL: branchCommitsURL(org, c.Repo, c.Branch),
-			})
+		rows = appendComponentRows(rows, c, conn, now)
+	}
+	return rows
+}
+
+// appendComponentRows is the shared row builder used by toRows / inFlightRows /
+// componentRows so URL/elapsed formatting stays in one place.
+func appendComponentRows(rows []tui.Row, c *trackedComponent, conn config.Connection, now time.Time) []tui.Row {
+	if c == nil {
+		return rows
+	}
+	org := conn.GitHubOrg
+	for _, p := range c.Pipelines {
+		rows = append(rows, tui.Row{
+			Component: c.Name,
+			Branch:    c.Branch,
+			Pipeline:  p.Name,
+			Status:    p.Status,
+			Retries:   p.RetryCount,
+			Elapsed:   pipelineElapsedText(p.StartedAt, p.CompletedAt, p.LastTransitionAt, p.Status, now),
+			Run:       normalize(p.PipelineRun),
+			RunURL:    pipelineRunDetailURL(p.Namespace, p.PipelineRun, conn),
+			CommitURL: commitChecksURL(org, c.Repo, c.SHA),
+			BranchURL: branchCommitsURL(org, c.Repo, c.Branch),
+		})
+	}
+	return rows
+}
+
+// componentRows returns the rows for a single component using the shared builder.
+func componentRows(c *trackedComponent, conn config.Connection) []tui.Row {
+	return appendComponentRows(nil, c, conn, time.Now().UTC())
+}
+
+// inFlightRows mirrors toRows but skips components whose names appear in the
+// notified set. Only the notification channel and the terminal table consume
+// this — the underlying tracked map and event log are untouched.
+func inFlightRows(tracked map[string]*trackedComponent, conn config.Connection, notified map[string]time.Time) []tui.Row {
+	now := time.Now().UTC()
+	rows := []tui.Row{}
+	for name, c := range tracked {
+		if _, ok := notified[name]; ok {
+			continue
 		}
+		rows = appendComponentRows(rows, c, conn, now)
 	}
 	return rows
 }
@@ -2059,7 +2248,7 @@ func refreshRuntimeSHA(ctx context.Context, ghc *gh.Client, c *trackedComponent)
 	return sha, nil
 }
 
-func buildProgressMarkdown(rows []tui.Row, startedAt, reportedAt time.Time, page, total int) string {
+func buildProgressMarkdown(rows []tui.Row, startedAt, reportedAt time.Time, page, total, doneCount, totalCount int) string {
 	elapsed := reportedAt.Sub(startedAt)
 	if elapsed < 0 {
 		elapsed = 0
@@ -2072,6 +2261,28 @@ func buildProgressMarkdown(rows []tui.Row, startedAt, reportedAt time.Time, page
 	sb.WriteString(fmt.Sprintf("**开始时间**: %s\n\n", formatMarkdownTime(startedAt)))
 	sb.WriteString(fmt.Sprintf("**报告时间**: %s\n\n", formatMarkdownTime(reportedAt)))
 	sb.WriteString(fmt.Sprintf("**已运行**: %s\n\n", elapsed.Truncate(time.Second)))
+	// Surfaced for at-a-glance progress when in-flight rows are filtered.
+	if totalCount > 0 {
+		sb.WriteString(fmt.Sprintf("**已完成**: %d/%d（已单独通知）\n\n", doneCount, totalCount))
+	}
+	sb.WriteString(tui.MarkdownTable(rows))
+	return sb.String()
+}
+
+func buildComponentSuccessMarkdown(component, branch string, startedAt, finishedAt time.Time, rows []tui.Row, page, total int) string {
+	elapsed := finishedAt.Sub(startedAt)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	var sb strings.Builder
+	sb.WriteString("## 组件流水线成功\n\n")
+	if total > 1 {
+		sb.WriteString(fmt.Sprintf("**分片**: %d/%d\n\n", page, total))
+	}
+	sb.WriteString(fmt.Sprintf("**组件**: `%s` | **分支**: `%s`\n\n", component, branch))
+	sb.WriteString(fmt.Sprintf("**开始时间**: %s\n\n", formatMarkdownTime(startedAt)))
+	sb.WriteString(fmt.Sprintf("**完成时间**: %s\n\n", formatMarkdownTime(finishedAt)))
+	sb.WriteString(fmt.Sprintf("**耗时**: %s\n\n", elapsed.Truncate(time.Second)))
 	sb.WriteString(tui.MarkdownTable(rows))
 	return sb.String()
 }

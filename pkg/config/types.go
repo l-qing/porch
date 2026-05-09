@@ -57,6 +57,34 @@ type Notification struct {
 	Events               []string `yaml:"events"`
 	ProgressInterval     Duration `yaml:"progress_interval"`
 	NotifyRowsPerMessage int      `yaml:"notify_rows_per_message"`
+	// NotifyComponentSuccess controls per-component first-success Wecom notifications.
+	// nil means use the default (true). Set to false to opt out and fall back to the
+	// pre-2026-05 behavior where only the global all_succeeded summary fires.
+	NotifyComponentSuccess *bool `yaml:"notify_component_success"`
+	// SuppressSucceededInProgress hides components that have already received a
+	// per-component success notification from subsequent progress reports and the
+	// terminal table. nil means use the default (true). Set to false to keep the
+	// pre-2026-05 behavior of always re-listing succeeded rows.
+	SuppressSucceededInProgress *bool `yaml:"suppress_succeeded_in_progress"`
+}
+
+// NotifyComponentSuccessEnabled returns true when per-component success
+// notifications should fire. nil pointer (field omitted in YAML) defaults to true.
+func (n Notification) NotifyComponentSuccessEnabled() bool {
+	if n.NotifyComponentSuccess == nil {
+		return true
+	}
+	return *n.NotifyComponentSuccess
+}
+
+// SuppressSucceededInProgressEnabled returns true when components that already
+// received a first-success notification should be hidden from subsequent
+// progress reports and from the terminal renderer. nil defaults to true.
+func (n Notification) SuppressSucceededInProgressEnabled() bool {
+	if n.SuppressSucceededInProgress == nil {
+		return true
+	}
+	return *n.SuppressSucceededInProgress
 }
 
 type Log struct {
