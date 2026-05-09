@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/signal"
 	"regexp"
@@ -856,8 +857,8 @@ func applyWatchScopeWithBranchLister(ctx context.Context, cfg *config.RuntimeCon
 
 func runtimeComponentBaseName(c config.LoadedComponent) string {
 	suffix := "@" + strings.TrimSpace(c.Branch)
-	if strings.HasSuffix(c.Name, suffix) {
-		return strings.TrimSuffix(c.Name, suffix)
+	if base, ok := strings.CutSuffix(c.Name, suffix); ok {
+		return base
 	}
 	return c.Name
 }
@@ -2249,57 +2250,48 @@ func refreshRuntimeSHA(ctx context.Context, ghc *gh.Client, c *trackedComponent)
 }
 
 func buildProgressMarkdown(rows []tui.Row, startedAt, reportedAt time.Time, page, total, doneCount, totalCount int) string {
-	elapsed := reportedAt.Sub(startedAt)
-	if elapsed < 0 {
-		elapsed = 0
-	}
+	elapsed := max(reportedAt.Sub(startedAt), 0)
 	var sb strings.Builder
 	sb.WriteString("## 流水线进度报告\n\n")
 	if total > 1 {
-		sb.WriteString(fmt.Sprintf("**分片**: %d/%d\n\n", page, total))
+		fmt.Fprintf(&sb, "**分片**: %d/%d\n\n", page, total)
 	}
-	sb.WriteString(fmt.Sprintf("**开始时间**: %s\n\n", formatMarkdownTime(startedAt)))
-	sb.WriteString(fmt.Sprintf("**报告时间**: %s\n\n", formatMarkdownTime(reportedAt)))
-	sb.WriteString(fmt.Sprintf("**已运行**: %s\n\n", elapsed.Truncate(time.Second)))
+	fmt.Fprintf(&sb, "**开始时间**: %s\n\n", formatMarkdownTime(startedAt))
+	fmt.Fprintf(&sb, "**报告时间**: %s\n\n", formatMarkdownTime(reportedAt))
+	fmt.Fprintf(&sb, "**已运行**: %s\n\n", elapsed.Truncate(time.Second))
 	// Surfaced for at-a-glance progress when in-flight rows are filtered.
 	if totalCount > 0 {
-		sb.WriteString(fmt.Sprintf("**已完成**: %d/%d（已单独通知）\n\n", doneCount, totalCount))
+		fmt.Fprintf(&sb, "**已完成**: %d/%d（已单独通知）\n\n", doneCount, totalCount)
 	}
 	sb.WriteString(tui.MarkdownTable(rows))
 	return sb.String()
 }
 
 func buildComponentSuccessMarkdown(component, branch string, startedAt, finishedAt time.Time, rows []tui.Row, page, total int) string {
-	elapsed := finishedAt.Sub(startedAt)
-	if elapsed < 0 {
-		elapsed = 0
-	}
+	elapsed := max(finishedAt.Sub(startedAt), 0)
 	var sb strings.Builder
 	sb.WriteString("## 组件流水线成功\n\n")
 	if total > 1 {
-		sb.WriteString(fmt.Sprintf("**分片**: %d/%d\n\n", page, total))
+		fmt.Fprintf(&sb, "**分片**: %d/%d\n\n", page, total)
 	}
-	sb.WriteString(fmt.Sprintf("**组件**: `%s` | **分支**: `%s`\n\n", component, branch))
-	sb.WriteString(fmt.Sprintf("**开始时间**: %s\n\n", formatMarkdownTime(startedAt)))
-	sb.WriteString(fmt.Sprintf("**完成时间**: %s\n\n", formatMarkdownTime(finishedAt)))
-	sb.WriteString(fmt.Sprintf("**耗时**: %s\n\n", elapsed.Truncate(time.Second)))
+	fmt.Fprintf(&sb, "**组件**: `%s` | **分支**: `%s`\n\n", component, branch)
+	fmt.Fprintf(&sb, "**开始时间**: %s\n\n", formatMarkdownTime(startedAt))
+	fmt.Fprintf(&sb, "**完成时间**: %s\n\n", formatMarkdownTime(finishedAt))
+	fmt.Fprintf(&sb, "**耗时**: %s\n\n", elapsed.Truncate(time.Second))
 	sb.WriteString(tui.MarkdownTable(rows))
 	return sb.String()
 }
 
 func buildFinalOKMarkdown(branch string, startedAt, finishedAt time.Time, rows []tui.Row, page, total int) string {
-	elapsed := finishedAt.Sub(startedAt)
-	if elapsed < 0 {
-		elapsed = 0
-	}
+	elapsed := max(finishedAt.Sub(startedAt), 0)
 	var sb strings.Builder
 	sb.WriteString("## 所有流水线已成功完成\n\n")
 	if total > 1 {
-		sb.WriteString(fmt.Sprintf("**分片**: %d/%d\n\n", page, total))
+		fmt.Fprintf(&sb, "**分片**: %d/%d\n\n", page, total)
 	}
-	sb.WriteString(fmt.Sprintf("**Branch**: `%s` | **耗时**: %s\n\n", branch, elapsed.Truncate(time.Second)))
-	sb.WriteString(fmt.Sprintf("**开始时间**: %s\n\n", formatMarkdownTime(startedAt)))
-	sb.WriteString(fmt.Sprintf("**完成时间**: %s\n\n", formatMarkdownTime(finishedAt)))
+	fmt.Fprintf(&sb, "**Branch**: `%s` | **耗时**: %s\n\n", branch, elapsed.Truncate(time.Second))
+	fmt.Fprintf(&sb, "**开始时间**: %s\n\n", formatMarkdownTime(startedAt))
+	fmt.Fprintf(&sb, "**完成时间**: %s\n\n", formatMarkdownTime(finishedAt))
 	sb.WriteString(tui.MarkdownTable(rows))
 	return sb.String()
 }
@@ -2379,9 +2371,7 @@ func formatMarkdownTime(t time.Time) string {
 
 func logEvent(log *logrus.Logger, kind, msg string, fields logrus.Fields) {
 	merged := logrus.Fields{"kind": kind}
-	for k, v := range fields {
-		merged[k] = v
-	}
+	maps.Copy(merged, fields)
 	log.WithFields(merged).Log(eventLevel(kind), msg)
 }
 
@@ -2394,8 +2384,16 @@ func eventLevel(kind string) logrus.Level {
 		return logrus.WarnLevel
 	case k == string(eventFailed) || k == string(eventExhausted) || k == string(eventTimeout):
 		return logrus.ErrorLevel
-	case k == string(eventGHFallback) || k == string(eventRunMismatch):
+	case k == string(eventRunMismatch):
+		// RUN_MISMATCH is a real anomaly: it accumulates toward a threshold
+		// that forces a retry, so keep it visible at the default level.
 		return logrus.WarnLevel
+	case k == string(eventGHFallback):
+		// Steady-state fallback (kubectl probe miss → GitHub check-run).
+		// Fires every watch tick by design; keep it on the TUI Events panel
+		// but quiet it in logrus so stdout and the log file are not flooded.
+		// Re-enable via --verbose / log_level=debug when investigating.
+		return logrus.DebugLevel
 	default:
 		return logrus.InfoLevel
 	}
