@@ -91,7 +91,6 @@ const (
 	eventFinalOK            watchEventKind = "FINAL_OK"
 	eventStateErr           watchEventKind = "STATE_ERR"
 	eventNotifyProgress     watchEventKind = "NOTIFY_PROGRESS"
-	eventNotifyProgressSkip watchEventKind = "NOTIFY_PROGRESS_SKIP"
 	eventTimeout            watchEventKind = "TIMEOUT"
 	eventExit               watchEventKind = "EXIT"
 	eventDryRetry           watchEventKind = "DRY_RETRY"
@@ -272,10 +271,6 @@ func runWatch(opts watchOptions) error {
 	// whenever the component flips back to in-flight (e.g., a new commit
 	// triggers a fresh pipeline run), so the next success can re-fire.
 	succeededReported := map[string]time.Time{}
-	// progressSignatures caches the last signature already covered by a progress
-	// notification per pipeline. Used to filter unchanged rows out of subsequent
-	// progress reports when ProgressChangesOnlyEnabled is true.
-	progressSignatures := map[string]string{}
 	finalDisabledResident := false
 	emit := func(kind watchEventKind, msg string, fields logrus.Fields) {
 		logEvent(log, string(kind), msg, fields)
@@ -357,26 +352,13 @@ func runWatch(opts watchOptions) error {
 
 		// Re-activation handling: drop any previously-reported components that
 		// are no longer in Succeeded state (typically a new commit triggered a
-		// fresh run) and rearm the global summary if needed. Reactivated names
-		// are captured before eviction so the progress-signature cache can be
-		// cleaned in lockstep — guaranteeing a re-activated component shows up
-		// in the very next progress report.
-		reactivated := reactivatedFromSuccess(succeededReported, tracked)
+		// fresh run) and rearm the global summary if needed.
 		evictReactivatedSuccess(succeededReported, tracked)
-		evictProgressSignaturesForComponents(progressSignatures, reactivated)
-		// Drop signatures whose component / pipeline left tracked between
-		// ticks (branch_patterns drift, runtime removal). Cheap O(|sig|) sweep
-		// keeps the cache from growing unboundedly across a long-lived watch.
-		pruneProgressSignaturesNotTracked(progressSignatures, tracked)
 		if !allSucceeded && allSucceededNotified {
 			allSucceededNotified = false
 		}
 
 		notifyComponentFirstSuccesses(context.Background(), wecom, cfg, tracked, succeededReported, startedAt, notifyRowsPerMessage, emit)
-		// Seed signatures for every component that just received (or previously
-		// received) a per-component success notification so the progress
-		// channel does not echo the same rows on the next tick.
-		seedProgressSignaturesForNotified(progressSignatures, tracked, succeededReported)
 
 		if allSucceeded && !allSucceededNotified {
 			now := time.Now().UTC()
@@ -457,40 +439,31 @@ func runWatch(opts watchOptions) error {
 		totalCount := len(tracked)
 
 		if pi := cfg.Root.Notification.ProgressInterval.Duration; pi > 0 && time.Since(lastProgressAt) >= pi {
+			// Periodic progress always renders the full set of in-flight (i.e.
+			// not yet succeeded) rows. Per-component success notifications fire
+			// independently via notifyComponentFirstSuccesses, so the report
+			// does not need a "changed only" diff layer — that layer used to
+			// produce a 0/total vs 0/in-flight denominator mismatch that read
+			// as "the missing row must have succeeded silently".
 			var progressRows []tui.Row
 			if suppressSucceeded {
 				progressRows = inFlightRows(tracked, cfg.Root.Connection, succeededReported)
 			} else {
 				progressRows = toRows(tracked, cfg.Root.Connection)
 			}
-			changesOnly := cfg.Root.Notification.ProgressChangesOnlyEnabled()
-			totalRows := len(progressRows)
-			if changesOnly {
-				progressRows = filterChangedRows(progressRows, tracked, progressSignatures)
-			}
-			// Skip the progress notification when no row qualifies — either
-			// nothing is in flight, or nothing changed since the last report.
-			// lastProgressAt is still advanced so we don't retry next tick.
-			// When changesOnly suppressed an otherwise non-empty row set, leave
-			// a local-only event in the log so operators are not staring at a
-			// silent watch and wondering whether it has stalled.
-			if changesOnly && len(progressRows) == 0 && totalRows > 0 {
-				emit(eventNotifyProgressSkip, fmt.Sprintf("progress report skipped: no pipeline changed since last tick elapsed=%s done=%d/%d in_flight=%d", time.Since(startedAt).Truncate(time.Second), doneCount, totalCount, totalRows), nil)
-			}
 			if len(progressRows) > 0 {
-				if changesOnly {
-					emit(eventNotifyProgress, fmt.Sprintf("sending progress report elapsed=%s done=%d/%d changed=%d/%d", time.Since(startedAt).Truncate(time.Second), doneCount, totalCount, len(progressRows), totalRows), nil)
-				} else {
-					emit(eventNotifyProgress, fmt.Sprintf("sending progress report elapsed=%s done=%d/%d rows=%d", time.Since(startedAt).Truncate(time.Second), doneCount, totalCount, len(progressRows)), nil)
+				// Only the suppress path strips succeeded rows out of progressRows,
+				// so only there does len(progressRows) actually equal the in-flight
+				// count. When suppress is off, leave inFlightCount=0 so the report
+				// header does not advertise a misleading "在飞" line that includes
+				// already-succeeded rows.
+				inFlightCount := 0
+				if suppressSucceeded {
+					inFlightCount = len(progressRows)
 				}
-				// Pass nil sig when changesOnly is disabled so notifyAndCommitProgress
-				// degenerates to a plain send.
-				sigForCommit := progressSignatures
-				if !changesOnly {
-					sigForCommit = nil
-				}
-				if err := notifyAndCommitProgress(context.Background(), wecom, notifyRowsPerMessage, progressRows, tracked, sigForCommit, func(chunk []tui.Row, page, total int) string {
-					return buildProgressMarkdown(chunk, startedAt, time.Now().UTC(), page, total, doneCount, totalCount)
+				emit(eventNotifyProgress, fmt.Sprintf("sending progress report elapsed=%s done=%d/%d rows=%d", time.Since(startedAt).Truncate(time.Second), doneCount, totalCount, len(progressRows)), nil)
+				if err := notifyMarkdownInChunks(context.Background(), wecom, notify.EventProgressReport, progressRows, notifyRowsPerMessage, func(chunk []tui.Row, page, total int) string {
+					return buildProgressMarkdown(chunk, startedAt, time.Now().UTC(), page, total, doneCount, totalCount, inFlightCount)
 				}); err != nil {
 					emit(eventNotifyErr, err.Error(), logrus.Fields{"error": err.Error()})
 				}
@@ -1634,200 +1607,6 @@ func evictReactivatedSuccess(notified map[string]time.Time, tracked map[string]*
 	return evicted
 }
 
-// reactivatedFromSuccess returns the names of components currently tracked in
-// `notified` that no longer report a fully-Succeeded state. Used as a shared
-// predicate so both succeeded-set eviction and progress-signature cleanup pivot
-// off the exact same set of components per tick.
-func reactivatedFromSuccess(notified map[string]time.Time, tracked map[string]*trackedComponent) []string {
-	if len(notified) == 0 {
-		return nil
-	}
-	var names []string
-	for name := range notified {
-		c, ok := tracked[name]
-		if !ok || !componentSucceeded(c) {
-			names = append(names, name)
-		}
-	}
-	return names
-}
-
-// pipelineProgressKey is the stable map key used by the progress-signature
-// cache. Component name plus pipeline name is unique within a watch session.
-func pipelineProgressKey(component, pipeline string) string {
-	return component + "/" + pipeline
-}
-
-// pipelineProgressSignature encodes the fields whose change should re-surface
-// a pipeline in the next progress notification. RetryCount and RunMismatch are
-// included separately because they may advance without a Status transition.
-// PipelineRun catches HEAD swaps where the new run starts in the same Status as
-// the previous one; LastTransitionAt covers everything else.
-//
-// Each string field is wrapped with %q so a literal '|' inside any of them
-// (theoretically impossible for Tekton object names today, but cheap to guard
-// against) cannot collide with the field separator and produce a false-positive
-// equal signature.
-func pipelineProgressSignature(p *trackedPipeline) string {
-	if p == nil {
-		return ""
-	}
-	transition := ""
-	if p.LastTransitionAt != nil {
-		transition = p.LastTransitionAt.UTC().Format(time.RFC3339Nano)
-	}
-	return fmt.Sprintf("%q|%q|%d|%d|%q|%q",
-		string(p.Status),
-		string(p.Conclusion),
-		p.RetryCount,
-		p.RunMismatch,
-		p.PipelineRun,
-		transition,
-	)
-}
-
-// filterChangedRows returns only the rows whose pipeline's current signature
-// differs from the value previously committed to `sig`. The map itself is not
-// modified — callers commit signatures explicitly after a successful send so a
-// failed notification does not silently mark rows as already-reported.
-//
-// Rows whose component or pipeline is not present in `tracked` are dropped
-// rather than passed through. The progressRows set is built from `tracked`
-// inside the same processTick, so a missing entry here would be a programmer
-// error; matching commitProgressSignatures' skip-on-missing behavior keeps the
-// two helpers from drifting (a passed-through row would otherwise re-notify
-// every tick because commit can never record its signature).
-func filterChangedRows(rows []tui.Row, tracked map[string]*trackedComponent, sig map[string]string) []tui.Row {
-	if len(rows) == 0 {
-		return rows
-	}
-	out := make([]tui.Row, 0, len(rows))
-	for _, r := range rows {
-		c, ok := tracked[r.Component]
-		if !ok {
-			continue
-		}
-		p, ok := c.Pipelines[r.Pipeline]
-		if !ok {
-			continue
-		}
-		key := pipelineProgressKey(r.Component, r.Pipeline)
-		if sig[key] != pipelineProgressSignature(p) {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-// commitProgressSignatures records the current signature of every pipeline
-// represented in `rows`. Called after the progress notification has been
-// dispatched (success or failure) so the same content does not retransmit on
-// the next tick.
-func commitProgressSignatures(rows []tui.Row, tracked map[string]*trackedComponent, sig map[string]string) {
-	if sig == nil {
-		return
-	}
-	for _, r := range rows {
-		c, ok := tracked[r.Component]
-		if !ok {
-			continue
-		}
-		p, ok := c.Pipelines[r.Pipeline]
-		if !ok {
-			continue
-		}
-		sig[pipelineProgressKey(r.Component, r.Pipeline)] = pipelineProgressSignature(p)
-	}
-}
-
-// notifyAndCommitProgress sends `progressRows` as a progress report and then
-// commits their signatures — even when the wecom call returned an error. A
-// transient delivery failure should not cause the same content to retransmit
-// next tick; real state changes still re-surface via filterChangedRows. When
-// `sig` is nil the commit becomes a no-op, which is how callers degrade the
-// helper to a plain send under ProgressChangesOnly=false.
-func notifyAndCommitProgress(
-	ctx context.Context,
-	wecom *notify.Wecom,
-	rowsPerMessage int,
-	progressRows []tui.Row,
-	tracked map[string]*trackedComponent,
-	sig map[string]string,
-	build func(chunk []tui.Row, page, total int) string,
-) error {
-	err := notifyMarkdownInChunks(ctx, wecom, notify.EventProgressReport, progressRows, rowsPerMessage, build)
-	commitProgressSignatures(progressRows, tracked, sig)
-	return err
-}
-
-// pruneProgressSignaturesNotTracked drops any signature whose component or
-// pipeline is no longer present in `tracked`. Without this the cache would
-// retain stale entries forever when branch_patterns rematch falls off, a
-// component is removed at runtime, or a pipeline is renamed mid-run. Bounded
-// in practice by `len(tracked)*pipelines/component`, but cheaper to evict
-// proactively than to debug later.
-func pruneProgressSignaturesNotTracked(sig map[string]string, tracked map[string]*trackedComponent) {
-	if len(sig) == 0 {
-		return
-	}
-	for key := range sig {
-		idx := strings.IndexByte(key, '/')
-		if idx <= 0 || idx >= len(key)-1 {
-			delete(sig, key)
-			continue
-		}
-		comp := key[:idx]
-		pipe := key[idx+1:]
-		c, ok := tracked[comp]
-		if !ok {
-			delete(sig, key)
-			continue
-		}
-		if _, ok := c.Pipelines[pipe]; !ok {
-			delete(sig, key)
-		}
-	}
-}
-
-// evictProgressSignaturesForComponents removes every signature entry whose
-// component appears in `names`. Pairs with reactivatedFromSuccess so that a
-// component flipping back to in-flight is guaranteed to surface in the next
-// progress notification, even if its pipeline somehow rebuilds the same
-// signature string.
-func evictProgressSignaturesForComponents(sig map[string]string, names []string) {
-	if len(sig) == 0 || len(names) == 0 {
-		return
-	}
-	for _, name := range names {
-		prefix := name + "/"
-		for key := range sig {
-			if strings.HasPrefix(key, prefix) {
-				delete(sig, key)
-			}
-		}
-	}
-}
-
-// seedProgressSignaturesForNotified copies the current signature of every
-// pipeline of every component that has already received a per-component
-// first-success notification into `sig`. This keeps the progress channel from
-// re-listing rows that the per-component success channel just covered, even
-// when SuppressSucceededInProgress is disabled.
-func seedProgressSignaturesForNotified(sig map[string]string, tracked map[string]*trackedComponent, notified map[string]time.Time) {
-	if sig == nil || len(notified) == 0 {
-		return
-	}
-	for name := range notified {
-		c, ok := tracked[name]
-		if !ok {
-			continue
-		}
-		for _, p := range c.Pipelines {
-			sig[pipelineProgressKey(name, p.Name)] = pipelineProgressSignature(p)
-		}
-	}
-}
-
 // notifyComponentFirstSuccesses emits a Wecom markdown notification for every
 // component that just transitioned into a fully-Succeeded state and was not
 // already in the notified set. Iteration is sorted by component name so the
@@ -2481,7 +2260,16 @@ func refreshRuntimeSHA(ctx context.Context, ghc *gh.Client, c *trackedComponent)
 	return sha, nil
 }
 
-func buildProgressMarkdown(rows []tui.Row, startedAt, reportedAt time.Time, page, total, doneCount, totalCount int) string {
+// buildProgressMarkdown renders the periodic progress notification body.
+// inFlightCount is the number of not-yet-succeeded pipelines actually
+// rendered in `rows`. It is surfaced explicitly alongside doneCount /
+// totalCount so readers can no longer mistake "fewer rows than totalCount"
+// for "those missing rows must have succeeded silently".
+//
+// Pass inFlightCount = 0 when the row set still contains succeeded entries
+// (e.g. SuppressSucceededInProgress is off): in that mode there is no
+// meaningful "in flight" subtotal to advertise, so the line is skipped.
+func buildProgressMarkdown(rows []tui.Row, startedAt, reportedAt time.Time, page, total, doneCount, totalCount, inFlightCount int) string {
 	elapsed := max(reportedAt.Sub(startedAt), 0)
 	var sb strings.Builder
 	sb.WriteString("## 流水线进度报告\n\n")
@@ -2491,9 +2279,15 @@ func buildProgressMarkdown(rows []tui.Row, startedAt, reportedAt time.Time, page
 	fmt.Fprintf(&sb, "**开始时间**: %s\n\n", formatMarkdownTime(startedAt))
 	fmt.Fprintf(&sb, "**报告时间**: %s\n\n", formatMarkdownTime(reportedAt))
 	fmt.Fprintf(&sb, "**已运行**: %s\n\n", elapsed.Truncate(time.Second))
-	// Surfaced for at-a-glance progress when in-flight rows are filtered.
 	if totalCount > 0 {
+		// "已完成" is the cumulative succeeded-and-notified count; "在飞"
+		// matches the suppress-path row set rendered below. Splitting them
+		// onto two lines avoids the previous 0/5 vs 0/4 confusion where
+		// readers inferred a phantom success.
 		fmt.Fprintf(&sb, "**已完成**: %d/%d（已单独通知）\n\n", doneCount, totalCount)
+		if inFlightCount > 0 {
+			fmt.Fprintf(&sb, "**在飞**: %d\n\n", inFlightCount)
+		}
 	}
 	sb.WriteString(tui.MarkdownTable(rows))
 	return sb.String()

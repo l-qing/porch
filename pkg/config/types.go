@@ -66,13 +66,6 @@ type Notification struct {
 	// terminal table. nil means use the default (true). Set to false to keep the
 	// pre-2026-05 behavior of always re-listing succeeded rows.
 	SuppressSucceededInProgress *bool `yaml:"suppress_succeeded_in_progress"`
-	// ProgressChangesOnly limits each periodic progress report to pipelines whose
-	// signature (status / conclusion / retry count / run mismatch / pipelinerun /
-	// last-transition-at) changed since the previous progress report. When no
-	// pipeline changed in a tick, the entire progress notification is skipped.
-	// nil means use the default (true). Set to false to keep the pre-2026-05
-	// behavior of sending the full in-flight snapshot every interval.
-	ProgressChangesOnly *bool `yaml:"progress_changes_only"`
 }
 
 // NotifyComponentSuccessEnabled returns true when per-component success
@@ -92,16 +85,6 @@ func (n Notification) SuppressSucceededInProgressEnabled() bool {
 		return true
 	}
 	return *n.SuppressSucceededInProgress
-}
-
-// ProgressChangesOnlyEnabled returns true when periodic progress notifications
-// should include only pipelines whose state changed since the last progress
-// notification. nil defaults to true.
-func (n Notification) ProgressChangesOnlyEnabled() bool {
-	if n.ProgressChangesOnly == nil {
-		return true
-	}
-	return *n.ProgressChangesOnly
 }
 
 type Log struct {
