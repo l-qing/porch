@@ -78,6 +78,11 @@ const (
 	eventRecoverWarn        watchEventKind = "RECOVER_WARN"
 	eventStateFile          watchEventKind = "STATE_FILE"
 	eventInit               watchEventKind = "INIT"
+	// eventStartupSilent fires once on the first watch tick, listing
+	// components that were already Succeeded at startup. They are recorded
+	// as "already notified" so notifyComponentFirstSuccesses skips them and
+	// the WeCom channel is not flooded with historical success cards.
+	eventStartupSilent      watchEventKind = "STARTUP_SILENT"
 	eventProbeMode          watchEventKind = "PROBE_MODE"
 	eventScope              watchEventKind = "SCOPE"
 	eventFinalDisabled      watchEventKind = "FINAL_DISABLED"
@@ -117,6 +122,13 @@ const runMismatchRetryThreshold = 3
 const defaultQueryErrorThreshold = 5
 const defaultNotifyRowsPerMessage = 12
 const maxNotifyMarkdownBytes = 3800 // limit 4k
+
+// startupSilentPreviewLimit caps how many baseline-silenced component names
+// are inlined into the STARTUP_SILENT event message. The full list is still
+// passed via the structured "components" field for downstream log sinks.
+// Without this cap, a watcher tracking hundreds of long-lived green branches
+// would emit a multi-kilobyte log line on every (re)start.
+const startupSilentPreviewLimit = 20
 const notifySendTimeout = 10 * time.Second
 const probePipelineTimeout = 20 * time.Second
 const recoverProbeTimeout = 10 * time.Second
@@ -282,6 +294,12 @@ func runWatch(opts watchOptions) error {
 	// used as a "hide from progress / terminal" filter; entries are evicted
 	// whenever the component flips back to in-flight (e.g., a new commit
 	// triggers a fresh pipeline run), so the next success can re-fire.
+	//
+	// On the very first watch tick, seedSucceededBaseline pre-populates this
+	// map for components that were already Succeeded at startup. Those are
+	// historical successes from before the watcher booted, not fresh
+	// transitions, so they must not produce per-component WeCom cards. They
+	// are surfaced once via a STARTUP_SILENT event instead.
 	succeededReported := map[string]time.Time{}
 	finalDisabledResident := false
 	emit := func(kind watchEventKind, msg string, fields logrus.Fields) {
@@ -356,6 +374,16 @@ func runWatch(opts watchOptions) error {
 			firstCheckDone = true
 			if !allComponentsSucceeded(tracked) {
 				lastProgressAt = time.Time{}
+			}
+			// Silence components that were already green when the watcher
+			// booted. Must run before notifyComponentFirstSuccesses so the
+			// baseline entries are present in succeededReported when it
+			// iterates and skips them.
+			if seeded := seedSucceededBaseline(tracked, succeededReported); len(seeded) > 0 {
+				emit(eventStartupSilent, formatStartupSilentMessage(seeded), logrus.Fields{
+					"count":      fmt.Sprintf("%d", len(seeded)),
+					"components": strings.Join(seeded, ","),
+				})
 			}
 		}
 
@@ -1601,6 +1629,50 @@ func componentCompletedAt(c *trackedComponent) time.Time {
 	return latest
 }
 
+// formatStartupSilentMessage builds the human-readable message for the
+// STARTUP_SILENT event. When the silenced set exceeds startupSilentPreviewLimit
+// the inlined list is truncated to that prefix; the full list still travels
+// via the structured "components" log field, so downstream tooling can see
+// every name without spamming the message column.
+func formatStartupSilentMessage(seeded []string) string {
+	if len(seeded) <= startupSilentPreviewLimit {
+		return fmt.Sprintf("startup baseline: silenced %d already-succeeded components: %s", len(seeded), strings.Join(seeded, ","))
+	}
+	preview := strings.Join(seeded[:startupSilentPreviewLimit], ",")
+	return fmt.Sprintf("startup baseline: silenced %d already-succeeded components (first %d: %s, ...)", len(seeded), startupSilentPreviewLimit, preview)
+}
+
+// seedSucceededBaseline pre-populates the notified set with components that
+// are already Succeeded on the first watch tick. The intent is to avoid
+// flooding WeCom with per-component success cards for runs that completed
+// long before the watcher booted; those are historical noise, not the
+// "just turned green" transitions the per-component channel exists for.
+//
+// The map value is the component's CompletedAt, mirroring what
+// notifyComponentFirstSuccesses would have stored had it actually fired, so
+// any downstream consumer that reads the timestamp sees a sensible value.
+//
+// Idempotency: entries already present in `notified` are left untouched, so
+// the function is safe to call after recoverFromState restored prior runs
+// without rewriting timestamps. Returns the sorted list of component names
+// that were freshly seeded so the caller can surface them in a
+// STARTUP_SILENT event for after-the-fact debugging.
+func seedSucceededBaseline(tracked map[string]*trackedComponent, notified map[string]time.Time) []string {
+	var seeded []string
+	for name, c := range tracked {
+		if !componentSucceeded(c) {
+			continue
+		}
+		if _, already := notified[name]; already {
+			continue
+		}
+		notified[name] = componentCompletedAt(c)
+		seeded = append(seeded, name)
+	}
+	sort.Strings(seeded)
+	return seeded
+}
+
 // evictReactivatedSuccess drops components from the notified set whose state
 // no longer matches Succeeded. Returns the number of evictions for callers /
 // tests that care about the count.
@@ -2292,11 +2364,14 @@ func buildProgressMarkdown(rows []tui.Row, startedAt, reportedAt time.Time, page
 	fmt.Fprintf(&sb, "**报告时间**: %s\n\n", formatMarkdownTime(reportedAt))
 	fmt.Fprintf(&sb, "**已运行**: %s\n\n", elapsed.Truncate(time.Second))
 	if totalCount > 0 {
-		// "已完成" is the cumulative succeeded-and-notified count; "在飞"
-		// matches the suppress-path row set rendered below. Splitting them
-		// onto two lines avoids the previous 0/5 vs 0/4 confusion where
+		// "已完成" is the cumulative count of components no longer being
+		// tracked for fresh notifications: either they were notified
+		// individually after a green transition, or they were already green
+		// when the watcher booted and got silenced via STARTUP_SILENT.
+		// "在飞" matches the suppress-path row set rendered below. Splitting
+		// them onto two lines avoids the previous 0/5 vs 0/4 confusion where
 		// readers inferred a phantom success.
-		fmt.Fprintf(&sb, "**已完成**: %d/%d（已单独通知）\n\n", doneCount, totalCount)
+		fmt.Fprintf(&sb, "**已完成**: %d/%d（已结束）\n\n", doneCount, totalCount)
 		if inFlightCount > 0 {
 			fmt.Fprintf(&sb, "**在飞**: %d\n\n", inFlightCount)
 		}

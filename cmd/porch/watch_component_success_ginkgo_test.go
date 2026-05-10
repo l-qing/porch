@@ -230,13 +230,13 @@ var _ = Describe("buildProgressMarkdown done counter", func() {
 
 	It("renders 已完成 M/N and 在飞 K when totalCount > 0 and inFlightCount > 0", func() {
 		md := buildProgressMarkdown(nil, started, reported, 1, 1, 7, 40, 33)
-		Expect(md).To(ContainSubstring("**已完成**: 7/40（已单独通知）"))
+		Expect(md).To(ContainSubstring("**已完成**: 7/40（已结束）"))
 		Expect(md).To(ContainSubstring("**在飞**: 33"))
 	})
 
 	It("omits 在飞 line when inFlightCount == 0 (suppressSucceeded off path)", func() {
 		md := buildProgressMarkdown(nil, started, reported, 1, 1, 7, 40, 0)
-		Expect(md).To(ContainSubstring("**已完成**: 7/40（已单独通知）"))
+		Expect(md).To(ContainSubstring("**已完成**: 7/40（已结束）"))
 		Expect(md).NotTo(ContainSubstring("在飞"))
 	})
 
