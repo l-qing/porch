@@ -201,6 +201,27 @@ var _ = Describe("buildComponentSuccessMarkdown", func() {
 		md := buildComponentSuccessMarkdown("comp-a", "main", started, started.Add(time.Minute), nil, 2, 3)
 		Expect(md).To(ContainSubstring("**分片**: 2/3"))
 	})
+
+	It("renders timestamps with the configured IANA timezone label", func() {
+		// Restore the package-level default after the spec so other tests
+		// continue to render with whatever runWatch / the process default
+		// would produce.
+		DeferCleanup(setNotifyLocation, notifyLoc, notifyLocName)
+
+		setNotifyLocation(time.UTC, "UTC")
+		started := time.Date(2026, 5, 9, 10, 0, 0, 0, time.UTC)
+		finished := started.Add(time.Minute)
+		md := buildComponentSuccessMarkdown("comp-a", "main", started, finished, nil, 1, 1)
+		Expect(md).To(ContainSubstring("2026-05-09 10:00:00 (UTC)"))
+		Expect(md).To(ContainSubstring("2026-05-09 10:01:00 (UTC)"))
+
+		shanghai, err := time.LoadLocation("Asia/Shanghai")
+		Expect(err).NotTo(HaveOccurred())
+		setNotifyLocation(shanghai, "Asia/Shanghai")
+		md = buildComponentSuccessMarkdown("comp-a", "main", started, finished, nil, 1, 1)
+		Expect(md).To(ContainSubstring("2026-05-09 18:00:00 (Asia/Shanghai)"))
+		Expect(md).To(ContainSubstring("2026-05-09 18:01:00 (Asia/Shanghai)"))
+	})
 })
 
 var _ = Describe("buildProgressMarkdown done counter", func() {

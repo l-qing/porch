@@ -173,11 +173,22 @@ func runWatch(opts watchOptions) error {
 	if err != nil {
 		return err
 	}
+	// Resolve the user-facing timezone before the logger is initialised so
+	// every subsequent log timestamp also reflects the configured zone.
+	// tzWarning is non-nil only when an explicit override (TZ env or
+	// notification.timezone) failed to parse; the resolver already fell
+	// through to the next source, so we only need to surface the warning.
+	loc, locName, tzWarning := cfg.Root.Notification.ResolveLocation()
+	time.Local = loc
+	setNotifyLocation(loc, locName)
 	log, closeLog, err := initLogger(cfg, opts.commonOptions)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = closeLog() }()
+	if tzWarning != nil {
+		log.WithField("error", tzWarning.Error()).Warn("falling back to next-priority notification timezone")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Root.Timeout.Global.Duration)
 	defer cancel()
@@ -236,6 +247,7 @@ func runWatch(opts watchOptions) error {
 		"progress_interval":    cfg.Root.Notification.ProgressInterval.Duration.String(),
 		"notify_rows":          fmt.Sprintf("%d", notifyRowsPerMessage),
 		"probe_mode":           string(mode),
+		"timezone":             locName,
 	}).Info("watch command initialized")
 	runtimeComponents, err := component.Initialize(ctx, cfg, ghc)
 	if err != nil {
@@ -2388,11 +2400,41 @@ func chunkRowsByConstraints(rows []tui.Row, maxRows, maxBytes int, build func(ch
 	return chunks
 }
 
+// notifyLoc / notifyLocName control how formatMarkdownTime renders timestamps
+// in WeCom notifications. They default to the process's current time.Local
+// so callers that bypass runWatch (e.g. unit tests that exercise the markdown
+// builders directly) still get a sane format. runWatch overrides them via
+// setNotifyLocation once the configured timezone has been resolved.
+var (
+	notifyLoc     = time.Local
+	notifyLocName = "Local"
+)
+
+// setNotifyLocation overrides the timezone used by formatMarkdownTime.
+// It is intended to be called once during runWatch startup, before any
+// notification goroutines spawn, so no synchronisation is required. Tests
+// also call it (and pair it with DeferCleanup) to exercise specific zones.
+// The label should be the original IANA name (e.g. "Asia/Shanghai") so the
+// rendered suffix stays unambiguous even after time.Local has been
+// reassigned at startup. A nil loc or empty name is a no-op for that field.
+func setNotifyLocation(loc *time.Location, name string) {
+	if loc == nil {
+		return
+	}
+	notifyLoc = loc
+	if name != "" {
+		notifyLocName = name
+	}
+}
+
 func formatMarkdownTime(t time.Time) string {
 	if t.IsZero() {
 		return "-"
 	}
-	return t.Local().Format("2006-01-02 15:04:05 MST")
+	// Render with explicit IANA-style label so readers can disambiguate the
+	// "CST" abbreviation, which collides between China Standard Time and US
+	// Central Standard Time when produced by Go's MST format token.
+	return fmt.Sprintf("%s (%s)", t.In(notifyLoc).Format("2006-01-02 15:04:05"), notifyLocName)
 }
 
 func logEvent(log *logrus.Logger, kind, msg string, fields logrus.Fields) {

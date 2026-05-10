@@ -1,6 +1,17 @@
 package config
 
-import "time"
+import (
+	"fmt"
+	"os"
+	"strings"
+	"time"
+)
+
+// DefaultNotificationTimezone is the fallback IANA timezone used to render
+// user-facing timestamps when neither the TZ environment variable nor the
+// notification.timezone YAML field is set. Beijing time matches the default
+// audience for porch's WeCom notifications.
+const DefaultNotificationTimezone = "Asia/Shanghai"
 
 type Root struct {
 	APIVersion         string             `yaml:"apiVersion"`
@@ -66,6 +77,16 @@ type Notification struct {
 	// terminal table. nil means use the default (true). Set to false to keep the
 	// pre-2026-05 behavior of always re-listing succeeded rows.
 	SuppressSucceededInProgress *bool `yaml:"suppress_succeeded_in_progress"`
+	// Timezone is the IANA timezone (e.g. "Asia/Shanghai", "UTC",
+	// "America/Los_Angeles") used to render user-facing timestamps in WeCom
+	// notifications, terminal output and logs. Resolution priority:
+	//   1. TZ environment variable (if set and parseable)
+	//   2. This YAML field (if set and parseable)
+	//   3. DefaultNotificationTimezone (Asia/Shanghai)
+	// An invalid value falls through to the next source rather than failing
+	// startup; the parse error is returned by ResolveLocation for the caller
+	// to surface as a warning.
+	Timezone string `yaml:"timezone"`
 }
 
 // NotifyComponentSuccessEnabled returns true when per-component success
@@ -85,6 +106,47 @@ func (n Notification) SuppressSucceededInProgressEnabled() bool {
 		return true
 	}
 	return *n.SuppressSucceededInProgress
+}
+
+// ResolveLocation picks the time.Location used to render user-facing
+// timestamps. Priority: TZ env var > Notification.Timezone YAML field >
+// DefaultNotificationTimezone. The returned label is the IANA name used to
+// load the location (so callers can render an unambiguous "(Asia/Shanghai)"
+// suffix without relying on the location's String() value, which can collapse
+// to "Local" once time.Local has been reassigned).
+//
+// If a higher-priority source is set but fails to parse, the error is
+// captured and the next source is tried. The first such error is returned so
+// the caller can log a warning. The default fallback (Asia/Shanghai) is part
+// of the standard tzdata bundled with the Go runtime; if that also fails to
+// load (e.g. a stripped container without zoneinfo), time.UTC is returned and
+// the load error is surfaced.
+func (n Notification) ResolveLocation() (*time.Location, string, error) {
+	var firstErr error
+	candidates := []struct {
+		source string
+		name   string
+	}{
+		{"TZ env", strings.TrimSpace(os.Getenv("TZ"))},
+		{"notification.timezone", strings.TrimSpace(n.Timezone)},
+		{"default", DefaultNotificationTimezone},
+	}
+	for _, c := range candidates {
+		if c.name == "" {
+			continue
+		}
+		loc, err := time.LoadLocation(c.name)
+		if err == nil {
+			return loc, c.name, firstErr
+		}
+		if firstErr == nil {
+			firstErr = fmt.Errorf("load timezone %q from %s: %w", c.name, c.source, err)
+		}
+	}
+	// Final safety net: tzdata is missing entirely. Fall back to UTC so the
+	// process keeps running, but propagate the first error so the caller
+	// can warn the user that their requested zone never applied.
+	return time.UTC, "UTC", firstErr
 }
 
 type Log struct {
